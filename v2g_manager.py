@@ -7,40 +7,10 @@ ULTRA PREMIUM VERSION - Realistic power delivery with accelerated simulation
 import json
 import time
 from typing import Dict, List, Tuple, Optional, Set
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import numpy as np
 
-@dataclass
-class V2GContract:
-    """Smart contract for V2G energy trading"""
-    vehicle_id: str
-    substation_id: str
-    power_provided_kw: float
-    start_time: datetime
-    duration_seconds: float
-    price_per_kwh: float  # Premium rate (10x normal charging cost)
-    total_earnings: float = 0
-    status: str = "active"  # active, completed, cancelled
-    
-@dataclass 
-class V2GSession:
-    """Individual V2G discharge session with realistic metrics"""
-    session_id: str
-    vehicle_id: str
-    station_id: str
-    substation_id: str
-    initial_soc: float
-    current_soc: float
-    power_delivered_kwh: float = 0
-    earnings: float = 0
-    start_time: datetime = field(default_factory=datetime.now)
-    end_time: Optional[datetime] = None
-    locked_at_station: bool = True
-    min_energy_required: float = 0  # No minimum requirement
-    target_discharge_duration: float = 0  # No duration requirement
-    actual_power_kw: float = 0  # Track actual discharge rate
-    peak_power_kw: float = 0  # Track peak discharge
+from v2g.core import V2GContract, V2GSession
 
 class V2GManager:
     """WORLD CLASS Professional V2G orchestration - ULTRA REALISTIC VERSION"""

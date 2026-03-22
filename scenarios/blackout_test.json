@@ -1,0 +1,12 @@
+{
+  "name": "Substation Blackout Test",
+  "description": "Stress test: two substations fail during peak load to validate V2G response.",
+  "time_of_day": 14.0,
+  "temperature_c": 35,
+  "traffic_density": "moderate",
+  "ev_spawn_count": 30,
+  "ev_percentage": 0.4,
+  "battery_soc_range": [0.2, 0.8],
+  "v2g_enabled": true,
+  "forced_failures": ["Times Square", "Penn Station"]
+}

@@ -18,7 +18,10 @@ from datetime import datetime, timedelta
 import warnings
 import threading
 import time
-warnings.filterwarnings('ignore')
+
+from config.settings import settings
+
+warnings.filterwarnings("ignore")
 
 class MLPowerGridEngine:
     """
@@ -58,9 +61,10 @@ class MLPowerGridEngine:
         self.v2g_trading_patterns = {}
         self.energy_price_trends = deque(maxlen=100)
         
-        # Real-time learning
-        self.online_learning_enabled = True
-        self.model_update_frequency = 100  # Update every 100 samples
+        # Real-time learning (configurable via settings.ml_config)
+        ml_cfg = settings.ml_config
+        self.online_learning_enabled = bool(ml_cfg.get("online_learning_enabled", True))
+        self.model_update_frequency = int(ml_cfg.get("model_update_frequency", 100))
         self.sample_count = 0
         self.last_model_update = time.time()
         

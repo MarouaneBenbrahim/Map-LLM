@@ -1,0 +1,12 @@
+{
+  "name": "Evening Rush Hour",
+  "description": "High traffic density at 5 PM with heavy EV demand and V2G stress.",
+  "time_of_day": 17.0,
+  "temperature_c": 32,
+  "traffic_density": "high",
+  "ev_spawn_count": 50,
+  "ev_percentage": 0.45,
+  "battery_soc_range": [0.15, 0.7],
+  "v2g_enabled": true,
+  "forced_failures": []
+}

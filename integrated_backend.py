@@ -1,6 +1,10 @@
 """
 Manhattan Power Grid - World Class Integrated System
-FULLY UPDATED with all fixes applied
+
+Canonical integrated backend used by the web application.
+Older integration layers live in `core/world_class_system.py` and
+`core/integrated_backend.py` but are considered legacy and should not be
+used for new code.
 """
 
 import json
@@ -12,6 +16,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 import math
 import random
+
+from core.backends import PowerBackend, TrafficBackend
 
 class PowerComponent(Enum):
     """Power system hierarchy"""
@@ -34,7 +40,7 @@ class DistributionTransformer:
     traffic_lights: List[str] = field(default_factory=list)
     operational: bool = True
 
-class ManhattanIntegratedSystem:
+class ManhattanIntegratedSystem(PowerBackend, TrafficBackend):
     """
     World-class integrated power and traffic system
     ALL traffic lights connected, realistic phases, no cables in water

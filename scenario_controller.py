@@ -11,9 +11,11 @@ Features:
 - Real-time monitoring
 """
 
+import json
 import threading
 import time
-from typing import Dict, List, Any
+from pathlib import Path
+from typing import Dict, List, Any, Optional
 from datetime import datetime
 import numpy as np
 
@@ -152,6 +154,52 @@ class ScenarioController:
 
         for name, capacity in substations.items():
             self.substation_monitors[name] = SubstationMonitor(name, capacity)
+
+    # ------------------------------------------------------------------
+    # Declarative scenario loading (JSON files in scenarios/)
+    # ------------------------------------------------------------------
+
+    def load_scenario_file(self, path: str | Path) -> Dict[str, Any]:
+        """Load a declarative scenario from a JSON file and apply its settings.
+
+        Returns the parsed scenario dict.
+        """
+        path = Path(path)
+        with open(path) as f:
+            scenario = json.load(f)
+
+        if "time_of_day" in scenario:
+            self.set_time(float(scenario["time_of_day"]))
+
+        if "temperature_c" in scenario:
+            temp_f = scenario["temperature_c"] * 9 / 5 + 32
+            self.set_temperature(temp_f)
+
+        if self.sumo_manager and scenario.get("ev_spawn_count"):
+            soc_range = scenario.get("battery_soc_range", [0.2, 0.9])
+            self.sumo_manager.spawn_vehicles(
+                count=scenario["ev_spawn_count"],
+                ev_percentage=scenario.get("ev_percentage", 0.3),
+                battery_min_soc=soc_range[0],
+                battery_max_soc=soc_range[1],
+            )
+
+        for sub_name in scenario.get("forced_failures", []):
+            try:
+                self.integrated_system.simulate_substation_failure(sub_name)
+            except Exception:
+                pass
+
+        print(f"[SCENARIO] Loaded '{scenario.get('name', path.stem)}' from {path.name}")
+        return scenario
+
+    @staticmethod
+    def list_scenario_files(directory: str | Path = "scenarios") -> List[Path]:
+        """Return paths to all .json scenario files in *directory*."""
+        d = Path(directory)
+        if not d.is_dir():
+            return []
+        return sorted(d.glob("*.json"))
 
     def set_time(self, hour: float, minute: int = 0, second: int = 0):
         """Set simulation time with hours, minutes, and seconds"""

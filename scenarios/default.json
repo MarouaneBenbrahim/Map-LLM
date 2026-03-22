@@ -1,0 +1,11 @@
+{
+  "name": "Default Startup",
+  "description": "Default scenario loaded at application startup: midday, moderate temperature, no forced failures.",
+  "time_of_day": 12.0,
+  "temperature_c": 22,
+  "ev_spawn_count": 0,
+  "ev_percentage": 0.3,
+  "battery_soc_range": [0.2, 0.9],
+  "v2g_enabled": false,
+  "forced_failures": []
+}

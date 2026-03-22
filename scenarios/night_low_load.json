@@ -1,0 +1,12 @@
+{
+  "name": "Night Low-Load",
+  "description": "Late night scenario with minimal traffic, low temperatures, and overnight EV charging.",
+  "time_of_day": 2.0,
+  "temperature_c": 18,
+  "traffic_density": "low",
+  "ev_spawn_count": 5,
+  "ev_percentage": 0.6,
+  "battery_soc_range": [0.1, 0.5],
+  "v2g_enabled": false,
+  "forced_failures": []
+}
