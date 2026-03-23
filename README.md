@@ -154,20 +154,6 @@ pytest -v
 
 Test coverage includes: V2G core types, chatbot factory selection, EV bus mapping, SUMO helpers (traffic lights, spawn, charging), intent classification, and scenario file loading.
 
-## Performance tips
-
-- **libsumo vs TraCI**: The app auto-detects `libsumo` (in-process, ~10× faster). Falls back to socket-based `traci` if unavailable.
-- **Step coarsening**: EV load and power flow updates run every 5 s of sim-time, not every 0.1 s tick.
-- **Broadcast frame-skipping**: Socket.IO state broadcasts happen every 5 SUMO steps to reduce network overhead.
-- **ML engine gating**: Online learning frequency and toggle are configurable via `config/settings.py` → `ml_config`.
-- **Performance endpoint**: `GET /api/perf` returns average step times for SUMO, power flow, and total loop.
-
-## Known limitations
-
-- `manhattan_sumo_manager.py` is still a large monolithic file; the `sumo_mgr/` package provides a façade and extracted helpers but the base class has not been fully decomposed.
-- `ultra_intelligent_chatbot.py` is monolithic; `chatbot/intents.py` and `chatbot/context.py` exist as extraction targets but the full refactor is incremental.
-- No CI pipeline yet — tests are run locally. A GitHub Actions workflow may be added later. Docker images are defined in [`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml).
-
 ## Docs
 
 See the `docs/` directory for the roadmap status and additional notes.
