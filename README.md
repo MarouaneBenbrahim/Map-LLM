@@ -1,5 +1,7 @@
 # SumoXPypsa
 
+Repository: [https://github.com/MarouaneBenbrahim/Map-LLM.git](https://github.com/MarouaneBenbrahim/Map-LLM.git)
+
 Manhattan co-simulation that couples:
 
 - **Power grid**: PyPSA-based distribution model (substations, loads, cables)
@@ -9,7 +11,49 @@ Manhattan co-simulation that couples:
 
 ## Quickstart
 
-### 1) Enter the container and start the app
+### Option A: Docker (recommended for a reproducible backend)
+
+Prerequisites: [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2 (`docker compose`).
+
+From the repository root:
+
+```bash
+cp .env.example .env
+# Optional: set OPENAI_API_KEY and other secrets in .env
+
+docker compose build
+docker compose up
+```
+
+The stack binds the app to all interfaces inside the container (`FLASK_HOST=0.0.0.0`, `PORT=5000`) and publishes **5000:5000**, so you can open the dashboard at `http://localhost:5000` on the host.
+
+The compose file bind-mounts the project directory to `/app` so you can edit static assets and Python without rebuilding the image. Rebuild when you change **`requirements.lock.txt`** or **`Dockerfile`**:
+
+```bash
+docker compose build --no-cache
+docker compose up
+```
+
+Useful defaults (see [`docker-compose.yml`](docker-compose.yml) and [`Dockerfile`](Dockerfile)):
+
+- **`USING_LIBSUMO=true`** for in-process SUMO when the wheel loads correctly.
+- **`PYTHONWARNINGS=ignore::SyntaxWarning`** to reduce noisy third-party warnings at import time.
+- Memory limit **16GB** on the service (adjust if needed).
+
+To run the container in the background:
+
+```bash
+docker compose up -d
+docker compose logs -f backend
+```
+
+To stop:
+
+```bash
+docker compose down
+```
+
+### Option B: Distrobox + virtualenv (development on Linux)
 
 From the repo root:
 
@@ -30,7 +74,7 @@ cp .env.example .env
 bash run.sh
 ```
 
-### 2) Open the dashboard
+### Open the dashboard
 
 - App: `http://localhost:5000`
 - Perf snapshot: `http://localhost:5000/api/perf`
@@ -122,7 +166,7 @@ Test coverage includes: V2G core types, chatbot factory selection, EV bus mappin
 
 - `manhattan_sumo_manager.py` is still a large monolithic file; the `sumo_mgr/` package provides a façade and extracted helpers but the base class has not been fully decomposed.
 - `ultra_intelligent_chatbot.py` is monolithic; `chatbot/intents.py` and `chatbot/context.py` exist as extraction targets but the full refactor is incremental.
-- No CI pipeline yet — tests are run locally. A Dockerfile and GitHub Actions workflow are planned.
+- No CI pipeline yet — tests are run locally. A GitHub Actions workflow may be added later. Docker images are defined in [`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml).
 
 ## Docs
 
