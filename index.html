@@ -255,7 +255,30 @@
                    min="0.1" max="5" step="0.1" value="1.0" 
                    onchange="setSimulationSpeed(this.value)">
         </div>
-        
+
+        <!-- Dynamic Routing Control -->
+        <div class="speed-control tab tab-overview" id="routing-control">
+            <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                <span>Dynamic Routing</span>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">
+                    <span id="routing-status-label" style="color:var(--text-muted);">On</span>
+                    <input type="checkbox" id="routing-toggle" checked
+                           onchange="toggleDynamicRouting(this.checked)"
+                           style="width:16px;height:16px;cursor:pointer;">
+                </label>
+            </div>
+            <div style="margin-top:6px;">
+                <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:2px;">
+                    <span>Reroute Period</span>
+                    <span><span id="routing-period-value">60</span>s</span>
+                </div>
+                <input type="range" class="speed-slider" id="routing-period-slider"
+                       min="10" max="300" step="10" value="60"
+                       oninput="document.getElementById('routing-period-value').textContent=this.value"
+                       onchange="setRoutingPeriod(this.value)">
+            </div>
+        </div>
+
         <!-- Machine Learning Dashboard -->
         <div id="section-ml" class="ml-dashboard tab tab-ml">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
@@ -555,6 +578,7 @@
 
 
     <!-- Custom JavaScript -->
+    <script src="/static/map-render-scheduler.js?v=nocache_1771265000"></script>
     <script src="/static/script.js?v=nocache_1771265000"></script>
     <script src="/static/ai-enhanced.js?v=nocache_1771265000"></script>
     <script src="/static/ai-functions.js?v=nocache_1771265000"></script>

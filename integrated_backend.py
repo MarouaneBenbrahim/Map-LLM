@@ -1,6 +1,10 @@
 """
 Manhattan Power Grid - World Class Integrated System
-FULLY UPDATED with all fixes applied
+
+Canonical integrated backend used by the web application.
+Older integration layers live in `core/world_class_system.py` and
+`core/integrated_backend.py` but are considered legacy and should not be
+used for new code.
 """
 
 import json
@@ -12,6 +16,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 import math
 import random
+
+from core.backends import PowerBackend, TrafficBackend
 
 class PowerComponent(Enum):
     """Power system hierarchy"""
@@ -34,7 +40,7 @@ class DistributionTransformer:
     traffic_lights: List[str] = field(default_factory=list)
     operational: bool = True
 
-class ManhattanIntegratedSystem:
+class ManhattanIntegratedSystem(PowerBackend, TrafficBackend):
     """
     World-class integrated power and traffic system
     ALL traffic lights connected, realistic phases, no cables in water
@@ -42,6 +48,13 @@ class ManhattanIntegratedSystem:
     
     def __init__(self, power_grid):
         self.power_grid = power_grid
+        
+        # Topology version — bumped on structural mutations so that
+        # get_network_state() can skip rebuilding static portions.
+        self._topo_version = 0
+        self._cached_tl_list = None
+        self._cached_cables = None
+        self._cached_topo_version = -1
         
         # Electrical hierarchy
         self.substations = {}
@@ -545,6 +558,7 @@ class ManhattanIntegratedSystem:
     
     def update_traffic_light_phases(self):
         """Update traffic lights with realistic red/yellow/green phases"""
+        self._topo_version += 1
         
         for tl_id, tl in self.traffic_lights.items():
             if tl['powered']:
@@ -573,6 +587,7 @@ class ManhattanIntegratedSystem:
             return {'error': error_msg}
 
         # Mark substation as failed
+        self._topo_version += 1
         self.substations[substation_name]['operational'] = False
 
         # DEBUG: Verify operational status is set correctly
@@ -699,73 +714,21 @@ class ManhattanIntegratedSystem:
                 if cable['from'] == dt_name:
                     cable['operational'] = True
         
+        self._topo_version += 1
         print(f"RESTORED: {substation_name}")
         return True
     
     def get_network_state(self) -> Dict[str, Any]:
-        """Get complete network state for visualization - PROPERLY FIXED"""
+        """Get complete network state for visualization.
 
-        # DEBUG: Log operational status of all substations
-        failed_subs = [name for name, data in self.substations.items() if not data.get('operational', True)]
-        if failed_subs:
-            print(f"[NETWORK STATE DEBUG] Failed substations: {failed_subs}")
+        Traffic-light and cable lists are cached and only rebuilt when
+        ``_topo_version`` changes (i.e. after a failure, restore, or
+        phase update).
+        """
 
-        # Calculate base load
-        base_load_mw = sum(s['load_mw'] for s in self.substations.values())
-
-        # Add EV charging load
-        ev_charging_load_mw = 0
-        for ev_station in self.ev_stations.values():
-            if 'current_load_kw' in ev_station:
-                ev_charging_load_mw += ev_station['current_load_kw'] / 1000
-        
-        # Calculate total load correctly
-        total_load_mw = base_load_mw + ev_charging_load_mw
-        
-        # Try to get from PyPSA if available - FIXED
-        if hasattr(self, 'power_grid') and self.power_grid:
-            try:
-                # CORRECT WAY: Sum p_set values, not time series
-                pypsa_load = 0
-                for load_name in self.power_grid.network.loads.index:
-                    load_value = self.power_grid.network.loads.at[load_name, 'p_set']
-                    pypsa_load += float(load_value) if load_value else 0
-                
-                # Only use PyPSA value if it's realistic (< 10,000 MW for Manhattan)
-                if 0 < pypsa_load < 10000:
-                    total_load_mw = pypsa_load + ev_charging_load_mw  # Add EV load to PyPSA base
-                    print(f"[DEBUG] Using PyPSA load + EV: {pypsa_load:.2f} + {ev_charging_load_mw:.2f} = {total_load_mw:.2f} MW")
-                else:
-                    # PyPSA value is unrealistic, use manual calculation
-                    print(f"[DEBUG] PyPSA load unrealistic ({pypsa_load:.2f} MW), using manual: {total_load_mw:.2f} MW")
-                    
-            except Exception as e:
-                print(f"[DEBUG] Using manual calculation: {total_load_mw:.2f} MW (error: {e})")
-        else:
-            print(f"[DEBUG] Using manual calculation: {total_load_mw:.2f} MW (PyPSA not available)")
-
-        substations_list = [
-            {
-                'name': name,
-                'lat': data['lat'],
-                'lon': data['lon'],
-                'capacity_mva': data['capacity_mva'],
-                'load_mw': data['load_mw'] + data.get('ev_load_mw', 0),  # Include EV load
-                'operational': data['operational'],
-                'coverage_area': data['coverage_area']
-            }
-            for name, data in self.substations.items()
-        ]
-
-        # DEBUG: Log substations being returned
-        for sub in substations_list:
-            if not sub['operational']:
-                print(f"[NETWORK STATE DEBUG] Returning FAILED substation: {sub['name']} operational={sub['operational']}")
-
-        return {
-            'substations': substations_list,
-            'total_load_mw': total_load_mw,  # This should now be correct
-            'traffic_lights': [
+        # --- Rebuild cached topology portions only when stale -----------
+        if self._cached_topo_version != self._topo_version:
+            self._cached_tl_list = [
                 {
                     'id': tl['id'],
                     'lat': tl['lat'],
@@ -776,8 +739,72 @@ class ManhattanIntegratedSystem:
                     'substation': tl['substation'],
                     'intersection': tl['intersection']
                 }
-                for tl in list(self.traffic_lights.values())
-            ],
+                for tl in self.traffic_lights.values()
+            ]
+            self._cached_cables = {
+                'primary': self.primary_cables,
+                'secondary': self.secondary_cables
+            }
+            self._cached_topo_version = self._topo_version
+
+        # --- Dynamic values (change every broadcast cycle) -------------
+        base_load_mw = sum(s['load_mw'] for s in self.substations.values())
+
+        ev_charging_load_mw = 0
+        for ev_station in self.ev_stations.values():
+            if 'current_load_kw' in ev_station:
+                ev_charging_load_mw += ev_station['current_load_kw'] / 1000
+
+        total_load_mw = base_load_mw + ev_charging_load_mw
+
+        if hasattr(self, 'power_grid') and self.power_grid:
+            try:
+                pypsa_load = 0
+                for load_name in self.power_grid.network.loads.index:
+                    load_value = self.power_grid.network.loads.at[load_name, 'p_set']
+                    pypsa_load += float(load_value) if load_value else 0
+
+                if 0 < pypsa_load < 10000:
+                    total_load_mw = pypsa_load + ev_charging_load_mw
+            except Exception:
+                pass
+
+        substations_list = [
+            {
+                'name': name,
+                'lat': data['lat'],
+                'lon': data['lon'],
+                'capacity_mva': data['capacity_mva'],
+                'load_mw': data['load_mw'] + data.get('ev_load_mw', 0),
+                'operational': data['operational'],
+                'coverage_area': data['coverage_area']
+            }
+            for name, data in self.substations.items()
+        ]
+
+        # TL color counts via single pass over cached list
+        powered = green = red = yellow = black = 0
+        for tl in self._cached_tl_list:
+            if tl['powered']:
+                powered += 1
+            c = tl['color']
+            if c == '#00ff00':
+                green += 1
+            elif c == '#ff0000':
+                red += 1
+            elif c == '#ffff00':
+                yellow += 1
+            elif c == '#000000':
+                black += 1
+
+        op_primary = sum(1 for c in self.primary_cables if c['operational'])
+        op_secondary = sum(1 for c in self.secondary_cables if c['operational'])
+
+        return {
+            'topology_version': self._topo_version,
+            'substations': substations_list,
+            'total_load_mw': total_load_mw,
+            'traffic_lights': self._cached_tl_list,
             'ev_stations': [
                 {
                     'id': ev['id'],
@@ -792,20 +819,17 @@ class ManhattanIntegratedSystem:
                 }
                 for ev in self.ev_stations.values()
             ],
-            'cables': {
-                'primary': self.primary_cables,
-                'secondary': self.secondary_cables
-            },
+            'cables': self._cached_cables,
             'statistics': {
                 'total_substations': len(self.substations),
                 'operational_substations': sum(1 for s in self.substations.values() if s['operational']),
                 'total_transformers': len(self.distribution_transformers),
                 'total_traffic_lights': len(self.traffic_lights),
-                'powered_traffic_lights': sum(1 for tl in self.traffic_lights.values() if tl['powered']),
-                'green_lights': sum(1 for tl in self.traffic_lights.values() if tl.get('color') == '#00ff00'),
-                'red_lights': sum(1 for tl in self.traffic_lights.values() if tl.get('color') == '#ff0000'),
-                'yellow_lights': sum(1 for tl in self.traffic_lights.values() if tl.get('color') == '#ffff00'),
-                'black_lights': sum(1 for tl in self.traffic_lights.values() if tl.get('color') == '#000000'),
+                'powered_traffic_lights': powered,
+                'green_lights': green,
+                'red_lights': red,
+                'yellow_lights': yellow,
+                'black_lights': black,
                 'total_ev_stations': len(self.ev_stations),
                 'operational_ev_stations': sum(1 for ev in self.ev_stations.values() if ev['operational']),
                 'total_load_mw': total_load_mw,
@@ -813,7 +837,7 @@ class ManhattanIntegratedSystem:
                 'ev_charging_load_mw': ev_charging_load_mw,
                 'total_primary_cables': len(self.primary_cables),
                 'total_secondary_cables': len(self.secondary_cables),
-                'operational_primary_cables': sum(1 for c in self.primary_cables if c['operational']),
-                'operational_secondary_cables': sum(1 for c in self.secondary_cables if c['operational'])
+                'operational_primary_cables': op_primary,
+                'operational_secondary_cables': op_secondary,
             }
         }

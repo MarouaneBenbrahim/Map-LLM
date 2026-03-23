@@ -1,0 +1,14 @@
+{
+  "name": "Stress Test - 1000 Vehicles",
+  "description": "Extreme load: 1000 vehicles (60% EV) spawned rapidly to stress-test simulation throughput and identify frozen/ghost vehicle issues.",
+  "time_of_day": 17.0,
+  "temperature_c": 35,
+  "traffic_density": "extreme",
+  "ev_spawn_count": 1000,
+  "ev_percentage": 0.6,
+  "battery_soc_range": [0.1, 0.8],
+  "target_vehicle_population": 1000,
+  "sustain_max_per_step": 50,
+  "v2g_enabled": true,
+  "forced_failures": []
+}

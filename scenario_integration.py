@@ -229,6 +229,45 @@ def integrate_scenario_controller(app, scenario_controller, load_model):
             'scenarios': scenarios
         })
 
+    @app.route('/api/scenario/files', methods=['GET'])
+    def list_scenario_files():
+        """List declarative JSON scenario files in the scenarios/ directory."""
+        try:
+            files = scenario_controller.list_scenario_files()
+            out = []
+            for p in files:
+                import json as _json
+                try:
+                    data = _json.loads(p.read_text())
+                except Exception:
+                    data = {}
+                out.append({
+                    'file': p.name,
+                    'name': data.get('name', p.stem),
+                    'description': data.get('description', ''),
+                })
+            return jsonify({'success': True, 'scenario_files': out})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @app.route('/api/scenario/load_file', methods=['POST'])
+    def load_scenario_file():
+        """Load a declarative scenario from a JSON file.
+
+        Body: ``{"file": "rush_hour.json"}``
+        """
+        try:
+            data = request.get_json()
+            filename = data.get('file', '')
+            from pathlib import Path
+            path = Path('scenarios') / filename
+            if not path.exists():
+                return jsonify({'success': False, 'error': f'File not found: {filename}'}), 404
+            result = scenario_controller.load_scenario_file(path)
+            return jsonify({'success': True, 'scenario': result})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
     @app.route('/api/scenario/monitoring/start', methods=['POST'])
     def start_monitoring():
         """Start automatic monitoring"""

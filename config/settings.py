@@ -10,6 +10,11 @@ from pathlib import Path
 import os
 from enum import Enum
 
+try:
+    import torch  # type: ignore
+except Exception:
+    torch = None
+
 class Environment(str, Enum):
     DEVELOPMENT = "development"
     STAGING = "staging"
@@ -131,14 +136,17 @@ class PowerGridSettings(BaseSettings):
             "load_forecast": "prophet",  # Facebook Prophet for time series
             "failure_prediction": "xgboost",
             "traffic_prediction": "lstm",
-            "optimization": "reinforcement_learning"
+            "optimization": "reinforcement_learning",
         },
         "training_schedule": "0 2 * * *",  # Daily at 2 AM
         "prediction_horizon": 24,  # hours
         "confidence_interval": 0.95,
         "anomaly_detection": True,
         "use_openai": True,  # Use GPT for intelligent analysis
-        "openai_model": "gpt-4-turbo-preview"
+        "openai_model": "gpt-4-turbo-preview",
+        # ML engine resource control
+        "online_learning_enabled": True,
+        "model_update_frequency": 100,
     })
     
     # Simulation Parameters
@@ -201,7 +209,7 @@ class PowerGridSettings(BaseSettings):
         "cache_ttl": 3600,  # seconds
         "enable_profiling": False,
         "memory_limit_gb": 16,
-        "enable_gpu": torch.cuda.is_available() if 'torch' in globals() else False
+        "enable_gpu": bool(torch and torch.cuda.is_available())
     })
     
     model_config = {

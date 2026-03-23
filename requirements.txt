@@ -29,8 +29,8 @@ alembic>=1.12.0
 python-dotenv==1.0.1
 structlog>=23.1.0
 
-# AI & LLM Integration
-openai==1.40.0
+# AI & LLM Integration (>=2.x required for httpx 0.28+; 1.x passes proxies= to httpx and breaks)
+openai>=2.16.0
 
 # Advanced AI Processing
 opencv-python>=4.8.0
@@ -58,10 +58,9 @@ scipy>=1.11.0
 # Report Generation
 fpdf2>=2.7.0
 
-# SUMO Traffic Simulation (External dependency - install separately)
-# Download from: https://eclipse.org/sumo/
-# traci (included with SUMO)
-# sumolib (included with SUMO)
+# SUMO Traffic Simulation (eclipse-sumo: binaries; libsumo: in-process Python API)
+eclipse-sumo>=1.20.0
+libsumo>=1.20.0
 
 # Development & Testing
 pytest>=7.4.0

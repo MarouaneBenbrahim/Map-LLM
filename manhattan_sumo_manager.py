@@ -17,26 +17,7 @@ import time
 from ev_battery_model import EVBatteryModel
 from ev_station_manager import EVStationManager
 
-# Check if SUMO is available - ULTRA PERFORMANCE MODE
-try:
-    # Try libsumo first (10x faster - in-process library)
-    import libsumo as traci
-    import sumolib
-    SUMO_AVAILABLE = True
-    USING_LIBSUMO = True
-    print("🔥 ULTRA PERFORMANCE MODE: Using libsumo (10x faster)")
-except ImportError:
-    try:
-        # Fallback to regular traci (socket-based, slower)
-        import traci
-        import sumolib
-        SUMO_AVAILABLE = True
-        USING_LIBSUMO = False
-        print("⚠️ Using traci (slower). For 10x speedup: pip install eclipse-sumo")
-    except ImportError:
-        print("Warning: SUMO not installed. Install with: pip install eclipse-sumo")
-        SUMO_AVAILABLE = False
-        USING_LIBSUMO = False
+from sumo_mgr.traci_compat import traci, sumolib, SUMO_AVAILABLE, USING_LIBSUMO
 
 class VehicleType(Enum):
     """Vehicle types matching real NYC traffic"""
@@ -83,8 +64,7 @@ class ManhattanSUMOManager:
     def _find_nearest_charging_station(self, vehicle_id: str, current_edge: str) -> Optional[str]:
         """Find the nearest operational charging station with available space"""
         
-        import traci
-        
+
         if not self.station_manager:
             return None
         
@@ -184,8 +164,16 @@ class ManhattanSUMOManager:
             ],
             'step_length': 0.1,
             'collision_action': 'warn',
-            'device.rerouting.probability': '0.8',
-            'device.battery.probability': '0.3'
+            'device.rerouting.probability': 1,
+            'device.rerouting.period': 60,
+            'device.battery.probability': '0.3',
+            # Simulation-seconds before SUMO teleports a stuck vehicle (jam resolution).
+            'time_to_teleport': 300,
+        }
+
+        self._routing_config = {
+            "probability": float(self.sumo_config['device.rerouting.probability']),
+            "period": int(self.sumo_config['device.rerouting.period']),
         }
         
         # Traffic light mapping
@@ -375,7 +363,10 @@ class ManhattanSUMOManager:
             print("SUMO already running")
             return False
         
-        # Build command
+        if gui and USING_LIBSUMO:
+            print("[SUMO] WARNING: libsumo does not support GUI mode — falling back to headless")
+            gui = False
+
         sumo_binary = "sumo-gui" if gui else "sumo"
         
         # ULTRA PERFORMANCE MODE - Optimized for 1000+ vehicles
@@ -393,14 +384,16 @@ class ManhattanSUMOManager:
             "--collision.mingap-factor", "1.0",    # Enforce minimum gap
             "--collision.stoptime", "0",           # Don't let vehicles stack when stopped
 
-            "--device.rerouting.probability", str(self.sumo_config.get('device.rerouting.probability', 0)),
+            "--device.rerouting.probability", str(self.sumo_config.get('device.rerouting.probability', 1)),
+            "--device.rerouting.period", str(self.sumo_config.get('device.rerouting.period', 60)),
 
             # PERFORMANCE OPTIMIZATIONS:
             "--no-warnings",               # Disable warning messages (I/O overhead)
             "--no-step-log",               # Disable step logging (I/O overhead)
             "--duration-log.disable",      # Disable duration logging
             "--lanechange.duration", "3",  # 3 seconds for lane change (more realistic than instant)
-            "--time-to-teleport", "-1",    # Disable teleporting (more realistic)
+            "--time-to-teleport",
+            str(self.sumo_config.get("time_to_teleport", 300)),
             "--threads", str(num_cores),   # Use all CPU cores
             "--routing-algorithm", "astar", # Faster routing algorithm
         ]
@@ -435,6 +428,27 @@ class ManhattanSUMOManager:
             print(f"Failed to start SUMO: {e}")
             return False
     
+    def get_routing_config(self) -> dict:
+        """Return current dynamic routing parameters."""
+        return dict(self._routing_config)
+
+    def update_routing_config(self, probability: float, period: int) -> dict:
+        """Update rerouting device parameters for all active vehicles."""
+        self._routing_config["probability"] = probability
+        self._routing_config["period"] = period
+
+        if self.running:
+            prob_str = str(probability)
+            period_str = str(period)
+            for vid in traci.vehicle.getIDList():
+                try:
+                    traci.vehicle.setParameter(vid, "device.rerouting.probability", prob_str)
+                    traci.vehicle.setParameter(vid, "device.rerouting.period", period_str)
+                except Exception:
+                    continue
+
+        return dict(self._routing_config)
+
     def _initialize_traffic_lights(self):
         """Map traffic lights between power grid and SUMO"""
         
@@ -497,7 +511,6 @@ class ManhattanSUMOManager:
         # NO CAP - spawn as many as requested
         print(f"Spawning {count} vehicles...")
         
-        import traci
         spawned = 0
         attempts = 0
         max_attempts = count * 10  # Allow many attempts to get exact count
@@ -728,12 +741,13 @@ class ManhattanSUMOManager:
             return []
         
         try:
-            import traci
+    
             vehicles_data = []
+            active_ids = set(traci.vehicle.getIDList())
             
             for vehicle in self.vehicles.values():
                 try:
-                    if vehicle.id in traci.vehicle.getIDList():
+                    if vehicle.id in active_ids:
                         # Get position from SUMO (in SUMO's internal coordinate system)
                         x, y = traci.vehicle.getPosition(vehicle.id)
                         
@@ -817,8 +831,7 @@ class ManhattanSUMOManager:
         if not self.running:
             return
         
-        import traci
-        
+
         # Get all SUMO traffic lights
         tl_ids = traci.trafficlight.getIDList()
         
@@ -894,8 +907,7 @@ class ManhattanSUMOManager:
         if not self.running:
             return
         
-        import traci
-        
+
         affected_count = 0
         
         for tl_id in traci.trafficlight.getIDList():
@@ -920,7 +932,6 @@ class ManhattanSUMOManager:
         if not self.running:
             return
         
-        import traci
         for tl_id in traci.trafficlight.getIDList():
             try:
                 state = traci.trafficlight.getRedYellowGreenState(tl_id)
@@ -942,8 +953,7 @@ class ManhattanSUMOManager:
         self._step_count += 1
 
         try:
-            import traci
-
+    
             # JUST DO THE SUMO STEP - That's it!
             traci.simulationStep()
 
@@ -977,7 +987,7 @@ class ManhattanSUMOManager:
             return
 
         try:
-            import traci
+    
             vehicle_ids = traci.vehicle.getIDList()
 
             if vehicle_ids:
@@ -1011,7 +1021,6 @@ class ManhattanSUMOManager:
     def _update_vehicles(self):
         """Update vehicle states with realistic battery drain - OPTIMIZED"""
 
-        import traci
         vehicle_ids = traci.vehicle.getIDList()
 
         # Initialize cache attributes if needed
@@ -1112,10 +1121,30 @@ class ManhattanSUMOManager:
                         if route_index >= len(route) - 1:
                             new_route = self._generate_realistic_route()
                             if new_route and len(new_route) >= 2:
-                                traci.vehicle.setRoute(veh_id, new_route)
-                                vehicle.config.destination = new_route[-1]
-                    
-                except:
+                                try:
+                                    traci.vehicle.setRoute(veh_id, new_route)
+                                    vehicle.config.destination = new_route[-1]
+                                    # Reset failure counter on success
+                                    if hasattr(vehicle, "_reroute_failures"):
+                                        vehicle._reroute_failures = 0
+                                except Exception:
+                                    vehicle._reroute_failures = getattr(
+                                        vehicle, "_reroute_failures", 0
+                                    ) + 1
+                            else:
+                                vehicle._reroute_failures = getattr(
+                                    vehicle, "_reroute_failures", 0
+                                ) + 1
+
+                            # Vehicle stuck at route-end for 5+ reroute cycles (50+ steps)
+                            # — remove it to free road space
+                            if getattr(vehicle, "_reroute_failures", 0) >= 5:
+                                try:
+                                    traci.vehicle.remove(veh_id)
+                                except Exception:
+                                    pass
+
+                except Exception:
                     pass
         
         # Remove vehicles that left
@@ -1125,14 +1154,15 @@ class ManhattanSUMOManager:
                 del self.vehicles[veh_id]
     
     def _generate_realistic_route(self) -> List[str]:
-        """Generate realistic Manhattan route with validation"""
-        
+        """Generate realistic Manhattan route with validated connectivity."""
+        _rt = traci
+
         if not self.edges:
             return []
-        
+
         edge_pool = self.spawn_edges if self.spawn_edges else self.edges
-        
-        for attempt in range(10):
+
+        for _attempt in range(10):
             if self.popular_routes and random.random() < 0.3:
                 origin, destination = random.choice(self.popular_routes)
             elif self.destinations and random.random() < 0.3:
@@ -1144,23 +1174,23 @@ class ManhattanSUMOManager:
                     destination = random.choice(edge_pool)
                 else:
                     return []
-            
-            if origin != destination:
-                try:
-                    if self.net.getEdge(origin) and self.net.getEdge(destination):
-                        return [origin, destination]
-                except:
-                    pass
-        
-        # CRITICAL FIX: Do not return [origin, destination] if not connected
-        # If we can't find a confirmed route, return empty list to try again next time
+
+            if origin == destination:
+                continue
+
+            try:
+                result = _rt.simulation.findRoute(origin, destination)
+                if result and result.edges and len(result.edges) >= 2:
+                    return list(result.edges)
+            except Exception:
+                continue
+
         return []
     
     def _route_to_charging_station(self, vehicle):
         """Route EV to nearest available charging station"""
         
-        import traci
-        
+
         if not vehicle.config.is_ev or vehicle.is_charging:
             return
         
@@ -1212,7 +1242,6 @@ class ManhattanSUMOManager:
         if self._charging_update_counter % 10 != 0:
             return  # Skip most updates for performance
 
-        import traci
         import random
         import time
 
@@ -1458,13 +1487,27 @@ class ManhattanSUMOManager:
                                         route = traci.simulation.findRoute(current_edge, station['edge'])
                                         if route and route.edges:
                                             traci.vehicle.setRoute(veh_id, route.edges)
-                                            
+                                            vehicle._station_route_failures = 0
+
                                             if vehicle.config.current_soc < 0.10:
                                                 traci.vehicle.setColor(veh_id, (255, 0, 0, 255))
                                             else:
                                                 traci.vehicle.setColor(veh_id, (255, 140, 0, 255))
-                                    except:
-                                        pass
+                                        else:
+                                            vehicle._station_route_failures = getattr(
+                                                vehicle, "_station_route_failures", 0
+                                            ) + 1
+                                    except Exception:
+                                        vehicle._station_route_failures = getattr(
+                                            vehicle, "_station_route_failures", 0
+                                        ) + 1
+
+                                    if getattr(vehicle, "_station_route_failures", 0) >= 3:
+                                        if not hasattr(vehicle, "stations_tried"):
+                                            vehicle.stations_tried = []
+                                        vehicle.stations_tried.append(vehicle.assigned_ev_station)
+                                        vehicle.assigned_ev_station = None
+                                        vehicle._station_route_failures = 0
                 
                 # ============================================================
                 # PRIORITY 4: ACTIVELY CHARGING
@@ -1580,12 +1623,14 @@ class ManhattanSUMOManager:
                 if vehicle.config.current_soc < 0.38 and not vehicle.is_charging and not vehicle.in_v2g_session:
                     route = traci.vehicle.getRoute(veh_id)
                     route_index = traci.vehicle.getRouteIndex(veh_id)
-                    
+
                     if route_index >= len(route) - 2:
-                        extension = self._create_route_extension(route[-1] if route else current_edge)
-                        if extension:
-                            new_route = list(route) + extension
-                            traci.vehicle.setRoute(veh_id, new_route)
+                        fresh = self._create_random_route(current_edge)
+                        if fresh:
+                            try:
+                                traci.vehicle.setRoute(veh_id, fresh)
+                            except Exception:
+                                pass
                             
             except Exception as e:
                 if "speed" not in str(e).lower():
@@ -1594,8 +1639,7 @@ class ManhattanSUMOManager:
     def _find_available_charging_station(self, vehicle_id: str, excluded_stations: list) -> Optional[str]:
         """Find nearest available charging station excluding tried ones"""
         
-        import traci
-        
+
         if not self.station_manager:
             return None
         
@@ -1638,11 +1682,9 @@ class ManhattanSUMOManager:
         
         return best_station
 
-
     def _create_diversion_route(self, current_edge: str) -> List[str]:
         """Create a temporary diversion route for 10 seconds of driving"""
         
-        import traci
         import random
         
         all_edges = [e for e in traci.edge.getIDList() if not e.startswith(':')]
@@ -1668,11 +1710,9 @@ class ManhattanSUMOManager:
         
         return route if len(route) > 1 else [current_edge]
 
-
     def _create_random_route(self, current_edge: str) -> List[str]:
         """Create a random route for normal driving"""
         
-        import traci
         import random
         
         all_edges = [e for e in traci.edge.getIDList() if not e.startswith(':')]
@@ -1691,11 +1731,9 @@ class ManhattanSUMOManager:
         
         return []
 
-
     def _create_route_extension(self, last_edge: str) -> List[str]:
         """Create route extension to prevent vehicle removal"""
         
-        import traci
         import random
         
         all_edges = [e for e in traci.edge.getIDList() if not e.startswith(':')]
@@ -1731,7 +1769,6 @@ class ManhattanSUMOManager:
         """Create a circular route around a charging station for vehicles waiting to charge
         FIXED: Always returns a valid route, never None or empty"""
         
-        import traci
         import random
         
         try:
@@ -1826,7 +1863,6 @@ class ManhattanSUMOManager:
     def _create_circle_route(self, vehicle):
         """Create a circular route for vehicle to follow while waiting"""
         
-        import traci
         import random
         
         try:
@@ -1914,7 +1950,7 @@ class ManhattanSUMOManager:
         active_count = 0
         if self.running:
             try:
-                import traci
+        
                 vehicle_ids = traci.vehicle.getIDList()
                 active_count = len(vehicle_ids)
                 
@@ -1975,8 +2011,7 @@ class ManhattanSUMOManager:
     def debug_charging_status(self):
         """Debug method to show what's happening with charging"""
         
-        import traci
-        
+
         if not self.running:
             return
         
@@ -2035,8 +2070,7 @@ class ManhattanSUMOManager:
     def force_test_charging(self):
         """Force a vehicle to need charging for testing"""
         
-        import traci
-        
+
         if not self.running:
             print("SUMO not running")
             return
@@ -2065,7 +2099,7 @@ class ManhattanSUMOManager:
         
         if self.running:
             try:
-                import traci
+        
                 traci.close()
                 self.running = False
                 print("SUMO stopped")
