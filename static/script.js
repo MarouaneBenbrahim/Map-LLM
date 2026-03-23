@@ -586,7 +586,9 @@
 
         // **LOAD NETWORK STATE FIRST TO CREATE LAYERS WITH DATA**
         await loadNetworkState();
-        console.log('✅ Network state loaded on map init');
+        console.log('Network state loaded on map init');
+
+        fetchRoutingConfig();
 
         // Safety: re-fetch after a brief delay to catch any layers that weren't
         // ready on the first call (3D terrain + EV layer init can race)
@@ -3139,6 +3141,47 @@ function initializeEVStationLayer() {
         });
     }
 
+    async function fetchRoutingConfig() {
+        try {
+            const res = await fetch('/api/traffic/routing');
+            const data = await res.json();
+            if (data.success && data.config) {
+                const toggle = document.getElementById('routing-toggle');
+                const slider = document.getElementById('routing-period-slider');
+                const label = document.getElementById('routing-status-label');
+                const periodVal = document.getElementById('routing-period-value');
+                if (toggle) toggle.checked = data.config.probability > 0;
+                if (label) label.textContent = data.config.probability > 0 ? 'On' : 'Off';
+                if (slider) slider.value = data.config.period;
+                if (periodVal) periodVal.textContent = data.config.period;
+            }
+        } catch (e) {
+            // Routing config not available yet
+        }
+    }
+
+    async function toggleDynamicRouting(enabled) {
+        const label = document.getElementById('routing-status-label');
+        if (label) label.textContent = enabled ? 'On' : 'Off';
+        const slider = document.getElementById('routing-period-slider');
+        const period = slider ? parseInt(slider.value) : 60;
+        await fetch('/api/traffic/routing', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({probability: enabled ? 1 : 0, period: period})
+        });
+    }
+
+    async function setRoutingPeriod(period) {
+        const toggle = document.getElementById('routing-toggle');
+        const probability = (toggle && toggle.checked) ? 1 : 0;
+        await fetch('/api/traffic/routing', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({probability: probability, period: parseInt(period)})
+        });
+    }
+
     async function toggleSubstation(name) {
         const sub = networkState.substations.find(s => s.name === name);
 
@@ -3247,10 +3290,16 @@ function initializeEVStationLayer() {
             currentInterpolationDuration = Math.max(MIN_INTERPOLATION_DURATION, currentInterpolationDuration);
         }
 
+        // Cache topology data (cables, traffic_lights) — the backend omits
+        // them on frames where the topology has not changed to save bandwidth.
+        if (state.cables) { processNetworkState._cachedCables = state.cables; }
+        else if (processNetworkState._cachedCables) { state.cables = processNetworkState._cachedCables; }
+        if (state.traffic_lights) { processNetworkState._cachedTL = state.traffic_lights; }
+        else if (processNetworkState._cachedTL) { state.traffic_lights = processNetworkState._cachedTL; }
+
         networkState = state;
         
-        // DEBUG: Log failed substations
-        const failedSubs = networkState.substations.filter(sub => !sub.operational);
+        const failedSubs = networkState.substations ? networkState.substations.filter(sub => !sub.operational) : [];
         
         // Handle V2G data from system_update event
         if (state.v2g) {

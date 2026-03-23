@@ -196,6 +196,9 @@ class ScenarioControllerUI {
                         <button onclick="scenarioUI.runScenario('late_night')" class="scenario-easy">
                             🌙 Late Night (3 AM)
                         </button>
+                        <button onclick="scenarioUI.runScenario('stress_test')" class="scenario-catastrophic">
+                            🚦 Stress Test (1000 vehicles)
+                        </button>
                     </div>
                 </div>
             </div>
@@ -747,6 +750,16 @@ class ScenarioControllerUI {
                         vehicles: 15,
                         name: '🌙 Late Night',
                         timeDesc: '3:00 AM'
+                    };
+                    break;
+
+                case 'stress_test':
+                    scenarioConfig = {
+                        time: 17,
+                        temp: 95,
+                        vehicles: 1000,
+                        name: '🚦 Stress Test',
+                        timeDesc: '5:00 PM'
                     };
                     break;
 
