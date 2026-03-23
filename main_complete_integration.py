@@ -365,7 +365,9 @@ if __name__ == "__main__":
     print(f"  - Primary Cables (13.8kV): {len(integrated_system.primary_cables)}")
     print(f"  - Secondary Cables (480V): {len(integrated_system.secondary_cables)}")
     print("=" * 60)
-    print("\nStarting Complete System at http://localhost:5000")
+    host = os.environ.get("FLASK_HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "5000"))
+    print(f"\nStarting Complete System at http://{host}:{port}")
     print("=" * 60)
 
-    socketio.run(app, debug=False, port=5000, allow_unsafe_werkzeug=True)
+    socketio.run(app, host=host, debug=False, port=port, allow_unsafe_werkzeug=True)
