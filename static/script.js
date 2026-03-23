@@ -560,7 +560,7 @@
         zoom: 14.5,
         pitch: 60,           // 3D perspective - tilt camera 60 degrees
         bearing: -17.6,      // Rotate for better Manhattan view
-        antialias: true,
+        antialias: false,
         preserveDrawingBuffer: true, // REQUIRED for screenshot capability
         refreshExpiredTiles: false,
         fadeDuration: 0,
@@ -745,680 +745,11 @@
         }
     });
 
-    // ==========================================
-    // WEBGL VEHICLE RENDERER (GPU ACCELERATED)
-    // ==========================================
-    class WebGLVehicleRenderer {
-        constructor(map) {
-            this.map = map;
-            this.vehicles = new Map();
-            this.animationFrame = null;
-            this.lastFrameTime = performance.now();
-            this.frameCount = 0;
-            this.fps = 0;
-            
-            this.gl = null;
-            this.program = null;
-            this.buffers = {};
-            
-            this.stats = {
-                fps: 0,
-                vehicles: 0,
-                drawCalls: 0,
-                updateTime: 0,
-                renderTime: 0
-            };
-            
-            this.initWebGL();
-            this.initWorker();
-        }
-        
-        initWebGL() {
-            this.customLayer = {
-                id: 'vehicle-webgl-layer',
-                type: 'custom',
-                
-                onAdd: (map, gl) => {
-                    this.gl = gl;
-                    
-                    // Modern vehicle shader with sleek car shape
-                    const vertexShader = `
-                        attribute vec2 a_position;
-                        attribute vec2 a_offset;
-                        attribute vec3 a_color;
-                        attribute float a_angle;
-                        attribute float a_scale;
-                        
-                        uniform mat4 u_matrix;
-                        uniform float u_zoom;
-                        
-                        varying vec3 v_color;
-                        varying vec2 v_offset;
-                        
-                        void main() {
-                            // Realistic vehicle size that doesn't get too big when zooming
-                            float baseSize = 1.5;  // Balanced base size for realistic scale
-                            float zoomFactor = smoothstep(14.0, 20.0, u_zoom);  // Start scaling later
-                            float size = a_scale * baseSize * (1.0 + zoomFactor * 0.15);  // Reduced zoom scaling
-                            
-                            vec2 rotatedOffset = vec2(
-                                a_offset.x * cos(a_angle) - a_offset.y * sin(a_angle),
-                                a_offset.x * sin(a_angle) + a_offset.y * cos(a_angle)
-                            );
-                            
-                            vec2 worldPos = a_position + rotatedOffset * size * 0.0000006;
-                            gl_Position = u_matrix * vec4(worldPos, 0.0, 1.0);
-                            v_color = a_color;
-                            v_offset = a_offset;
-                        }
-                    `;
-
-                    const fragmentShader = `
-                        precision highp float;
-                        varying vec3 v_color;
-                        varying vec2 v_offset;
-                        
-                        void main() {
-                            // Create rounded rectangle (car shape)
-                            vec2 p = abs(v_offset);
-                            float cornerRadius = 0.3;
-                            vec2 rectSize = vec2(0.4, 0.9);
-                            
-                            vec2 q = p - rectSize + cornerRadius;
-                            float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - cornerRadius;
-                            
-                            // Define border
-                            float borderWidth = 0.12;
-                            float innerDist = dist + borderWidth;
-                            
-                            // Create alpha for anti-aliasing
-                            float alpha = 1.0 - smoothstep(-0.02, 0.02, dist);
-                            if (alpha < 0.01) discard;
-                            
-                            // Determine if we're in border or body
-                            vec3 finalColor;
-                            if (innerDist < 0.0) {
-                                // Inside the vehicle body
-                                float gradient = 1.0 - (v_offset.y + 1.0) * 0.15;
-                                float glow = 1.0 + (1.0 - innerDist * 2.0) * 0.15;
-                                
-                                finalColor = v_color * gradient * glow;
-                                
-                                // Add subtle windshield highlight
-                                if (v_offset.y > 0.3 && v_offset.y < 0.6) {
-                                    finalColor = mix(finalColor, vec3(1.0), 0.1);
-                                }
-                            } else {
-                                // In the border area - make it black
-                                finalColor = vec3(0.0, 0.0, 0.0);
-                            }
-                            
-                            gl_FragColor = vec4(finalColor, alpha);
-                        }
-                    `;
-                    
-                    const vs = this.compileShader(gl, vertexShader, gl.VERTEX_SHADER);
-                    const fs = this.compileShader(gl, fragmentShader, gl.FRAGMENT_SHADER);
-                    
-                    this.program = gl.createProgram();
-                    gl.attachShader(this.program, vs);
-                    gl.attachShader(this.program, fs);
-                    gl.linkProgram(this.program);
-                    
-                    this.attributes = {
-                        position: gl.getAttribLocation(this.program, 'a_position'),
-                        offset: gl.getAttribLocation(this.program, 'a_offset'),
-                        color: gl.getAttribLocation(this.program, 'a_color'),
-                        angle: gl.getAttribLocation(this.program, 'a_angle'),
-                        scale: gl.getAttribLocation(this.program, 'a_scale')
-                    };
-                    
-                    this.uniforms = {
-                        matrix: gl.getUniformLocation(this.program, 'u_matrix'),
-                        zoom: gl.getUniformLocation(this.program, 'u_zoom')
-                    };
-                    
-                    this.buffers = {
-                        position: gl.createBuffer(),
-                        offset: gl.createBuffer(),
-                        color: gl.createBuffer(),
-                        angle: gl.createBuffer(),
-                        scale: gl.createBuffer()
-                    };
-                    
-                    this.rectangleVertices = new Float32Array([
-                        -0.4, -1.0,  // narrower width, same length
-                        0.4, -1.0,
-                        0.4,  1.0,
-                        -0.4, -1.0,
-                        0.4,  1.0,
-                        -0.4,  1.0
-                    ]);
-                    
-                    const maxVehicles = PERFORMANCE_CONFIG.vehiclePoolSize;
-                    this.arrays = {
-                        positions: new Float32Array(maxVehicles * 12),
-                        offsets: new Float32Array(maxVehicles * 12),
-                        colors: new Float32Array(maxVehicles * 18),
-                        angles: new Float32Array(maxVehicles * 6),
-                        scales: new Float32Array(maxVehicles * 6)
-                    };
-                },
-                
-                render: (gl, matrix) => {
-                    if (!this.program || this.vehicles.size === 0) return;
-                    
-                    const startTime = performance.now();
-                    
-                    gl.useProgram(this.program);
-                    gl.uniformMatrix4fv(this.uniforms.matrix, false, matrix);
-                    gl.uniform1f(this.uniforms.zoom, this.map.getZoom());
-                    
-                    let vehicleIndex = 0;
-                    for (const [id, vehicle] of this.vehicles) {
-                        if (vehicleIndex >= PERFORMANCE_CONFIG.vehiclePoolSize) break;
-                        
-                        const pos = this.getInterpolatedPosition(vehicle);
-                        const projected = mapboxgl.MercatorCoordinate.fromLngLat([pos.lon, pos.lat]);
-                        
-                        const color = this.getVehicleColor(vehicle.data);
-                        
-                        let angle = vehicle.angle || 0;
-                        
-                        for (let v = 0; v < 6; v++) {
-                            const idx = vehicleIndex * 6 + v;
-                            
-                            this.arrays.positions[idx * 2] = projected.x;
-                            this.arrays.positions[idx * 2 + 1] = projected.y;
-                            
-                            this.arrays.offsets[idx * 2] = this.rectangleVertices[v * 2];
-                            this.arrays.offsets[idx * 2 + 1] = this.rectangleVertices[v * 2 + 1];
-                            
-                            this.arrays.colors[idx * 3] = color.r;
-                            this.arrays.colors[idx * 3 + 1] = color.g;
-                            this.arrays.colors[idx * 3 + 2] = color.b;
-                            
-                            this.arrays.angles[idx] = angle;
-                            
-                            this.arrays.scales[idx] = (vehicle.scale || 1) * 0.7;  // Smaller scale for realistic view
-                        }
-                        
-                        vehicleIndex++;
-                    }
-                    
-                    const vertexCount = vehicleIndex * 6;
-                    
-                    this.updateBuffer(gl, this.buffers.position, this.arrays.positions, this.attributes.position, 2, vertexCount);
-                    this.updateBuffer(gl, this.buffers.offset, this.arrays.offsets, this.attributes.offset, 2, vertexCount);
-                    this.updateBuffer(gl, this.buffers.color, this.arrays.colors, this.attributes.color, 3, vertexCount);
-                    this.updateBuffer(gl, this.buffers.angle, this.arrays.angles, this.attributes.angle, 1, vertexCount);
-                    this.updateBuffer(gl, this.buffers.scale, this.arrays.scales, this.attributes.scale, 1, vertexCount);
-                    
-                    gl.enable(gl.BLEND);
-                    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-                    gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
-                    gl.disable(gl.BLEND);
-                    
-                    this.stats.renderTime = performance.now() - startTime;
-                    this.stats.drawCalls++;
-                }
-            };
-            
-            if (PERFORMANCE_CONFIG.renderMode === 'webgl') {
-                this.map.addLayer(this.customLayer);
-            }
-        }
-        
-        initWorker() {
-            this.worker = null;
-            return;
-        }
-        
-        compileShader(gl, source, type) {
-            const shader = gl.createShader(type);
-            gl.shaderSource(shader, source);
-            gl.compileShader(shader);
-            
-            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-                console.error('Shader compilation error:', gl.getShaderInfoLog(shader));
-                gl.deleteShader(shader);
-                return null;
-            }
-            
-            return shader;
-        }
-        
-        updateBuffer(gl, buffer, data, attribute, size, count) {
-            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-            // Use bufferSubData for better performance with existing buffers
-            const byteLength = count * size * 4; // Float32 = 4 bytes
-            if (buffer.size !== byteLength) {
-                gl.bufferData(gl.ARRAY_BUFFER, data.buffer, gl.DYNAMIC_DRAW);
-                buffer.size = byteLength;
-            } else {
-                gl.bufferSubData(gl.ARRAY_BUFFER, 0, data.subarray(0, count * size));
-            }
-            gl.enableVertexAttribArray(attribute);
-            gl.vertexAttribPointer(attribute, size, gl.FLOAT, false, 0, 0);
-        }
-        
-        getInterpolatedPosition(vehicle) {
-            return {
-                lon: vehicle.currentLon || vehicle.targetLon || 0,
-                lat: vehicle.currentLat || vehicle.targetLat || 0
-            };
-        }
-
-        updateVehicles(vehicleData) {
-            const updateStartTime = performance.now();
-            const currentTime = performance.now();
-
-            // Pre-allocate Set for O(1) lookups
-            const currentIds = new Set();
-
-            vehicleData.forEach(data => {
-                currentIds.add(data.id);
-
-                if (!this.vehicles.has(data.id)) {
-                    this.vehicles.set(data.id, {
-                        id: data.id,
-                        previousLon: data.lon,
-                        previousLat: data.lat,
-                        currentLon: data.lon,
-                        currentLat: data.lat,
-                        targetLon: data.lon,
-                        targetLat: data.lat,
-                        lastUpdateTime: currentTime,
-                        interpolationProgress: 0,
-                        velocityLon: 0,
-                        velocityLat: 0,
-                        angle: 0,
-                        targetAngle: 0,  // Initialize target angle for smooth rotation
-                        scale: 0,
-                        targetScale: 0.8,
-                        opacity: 0,
-                        targetOpacity: 1,
-                        data: data,
-                        trail: []
-                    });
-                } else {
-                    const vehicle = this.vehicles.get(data.id);
-                    
-                    const distanceMoved = Math.sqrt(
-                        Math.pow(data.lon - vehicle.targetLon, 2) + 
-                        Math.pow(data.lat - vehicle.targetLat, 2)
-                    );
-                    
-                    if (distanceMoved > 0.000001) {
-                        vehicle.previousLon = vehicle.currentLon;
-                        vehicle.previousLat = vehicle.currentLat;
-                        
-                        vehicle.targetLon = data.lon;
-                        vehicle.targetLat = data.lat;
-                        
-                        vehicle.interpolationProgress = 0;
-                        vehicle.lastUpdateTime = currentTime;
-                        
-                        const dx = vehicle.targetLon - vehicle.previousLon;
-                        const dy = vehicle.targetLat - vehicle.previousLat;
-                        if (Math.abs(dx) > 0.00001 || Math.abs(dy) > 0.00001) {
-                            vehicle.angle = Math.atan2(dx, dy) + Math.PI;
-                        }
-                    }
-                    vehicle.data = data;
-                }
-            });
-
-            // Remove vehicles that are no longer present (reuse currentIds from above)
-            for (const [id, vehicle] of this.vehicles) {
-                if (!currentIds.has(id)) {
-                    vehicle.targetOpacity = 0;
-                    vehicle.targetScale = 0;
-                    if (vehicle.opacity < 0.01) {
-                        this.vehicles.delete(id);
-                    }
-                }
-            }
-            
-            this.stats.updateTime = performance.now() - updateStartTime;
-            this.stats.vehicles = this.vehicles.size;
-        }
-interpolate(deltaTime) {
-            const now = performance.now();
-            
-            for (const [id, vehicle] of this.vehicles) {
-                const timeSinceUpdate = now - vehicle.lastUpdateTime;
-                const expectedUpdateInterval = PERFORMANCE_CONFIG.dataUpdateRate * 1.2;
-                vehicle.interpolationProgress = Math.min(1, timeSinceUpdate / expectedUpdateInterval);
-                
-                const easeInOutSine = (t) => {
-                    return -(Math.cos(Math.PI * t) - 1) / 2;
-                };
-                
-                const easedProgress = easeInOutSine(vehicle.interpolationProgress);
-                
-                const microSmooth = 0.02;
-                const targetLon = vehicle.previousLon + (vehicle.targetLon - vehicle.previousLon) * easedProgress;
-                const targetLat = vehicle.previousLat + (vehicle.targetLat - vehicle.previousLat) * easedProgress;
-                
-                vehicle.currentLon = vehicle.currentLon * (1 - microSmooth) + targetLon * microSmooth;
-                vehicle.currentLat = vehicle.currentLat * (1 - microSmooth) + targetLat * microSmooth;
-                
-                const scaleSpeed = 0.08;
-                if (Math.abs(vehicle.targetScale - vehicle.scale) > 0.001) {
-                    vehicle.scale += (vehicle.targetScale - vehicle.scale) * scaleSpeed;
-                }
-                
-                const opacitySpeed = 0.08;
-                if (Math.abs(vehicle.targetOpacity - vehicle.opacity) > 0.001) {
-                    vehicle.opacity += (vehicle.targetOpacity - vehicle.opacity) * opacitySpeed;
-                }
-            }
-            
-            if (PERFORMANCE_CONFIG.renderMode === 'webgl') {
-                this.map.triggerRepaint();
-            }
-        }
-        
-        updateFromWorker(positions) {
-            positions.forEach(pos => {
-                const vehicle = this.vehicles.get(pos.id);
-                if (vehicle) {
-                    vehicle.currentLon = pos.lon;
-                    vehicle.currentLat = pos.lat;
-                }
-            });
-        }
-                
-        getVehicleColor(data) {
-            let r, g, b;
-            
-            if (data.is_stranded) {
-                // Purple for stranded
-                r = 0.8; g = 0.2; b = 1.0;
-            } else if (data.is_charging) {
-                // Cyan for charging
-                r = 0; g = 0.9; b = 1.0;
-            } else if (data.is_queued) {
-                // Yellow for queued
-                r = 1.0; g = 0.9; b = 0.1;
-            } else if (data.is_circling) {
-                // Orange for circling
-                r = 1.0; g = 0.6; b = 0.2;
-            } else if (data.is_ev) {
-                const battery = data.battery_percent || 100;
-                if (battery < 20) {
-                    // Red for low battery
-                    r = 1.0; g = 0.2; b = 0.2;
-                } else if (battery < 50) {
-                    // Orange for medium battery
-                    r = 1.0; g = 0.7; b = 0.2;
-                } else {
-                    // Green for good battery
-                    r = 0.2; g = 0.9; b = 0.3;
-                }
-            } else {
-                // White/light blue for gas vehicles
-                r = 0.8; g = 0.8; b = 1.0;
-            }
-            
-            return { r, g, b };
-        }
-        
-        getStats() {
-            return this.stats;
-        }
-        
-        clear() {
-            this.vehicles.clear();
-            if (this.worker) {
-                this.worker.postMessage({ type: 'clear' });
-            }
-        }
-    }
-
-    // Throttling controls for heavy UI layers
-    let _uiLoopCounter = 0;
-    const UI_DECIMATION_FACTOR = 3; // Render heavy layers every 3rd loop
-    const VEHICLE_SYMBOL_THRESHOLD = 200; // Above this, thin or skip symbol layer
-    const VEHICLE_SYMBOL_UPDATE_MS = 1000; // Update symbols at most once per second
-    let _lastVehicleSymbolUpdate = 0;
-
-    // ==========================================
-    // HYBRID DOM RENDERER (FALLBACK)
-    // ==========================================
-    class HybridVehicleRenderer {
-        constructor(map) {
-            this.map = map;
-            this.vehicles = new Map();
-            this.markerPool = [];
-            this.activeMarkers = new Map();
-            this.stats = { vehicles: 0, updateTime: 0, renderTime: 0 };
-        }
-        
-        createMarker(data) {
-            let el;
-            if (this.markerPool.length > 0) {
-                el = this.markerPool.pop();
-                el.style.display = 'block';
-            } else {
-                el = document.createElement('div');
-                el.className = 'vehicle-marker-ultra';
-                el.style.cssText = `
-                    position: absolute;
-                    width: 14px;
-                    height: 14px;
-                    border-radius: 50%;
-                    border: 2.5px solid rgba(255,255,255,0.95);
-                    box-shadow: 0 3px 10px rgba(0,0,0,0.55);
-                    will-change: transform;
-                    transform: translate(-50%, -50%);
-                    transition: transform 0.05s linear;
-                    pointer-events: auto;
-                    cursor: pointer;
-                `;
-            }
-            
-            el.style.background = this.getColor(data);
-            
-            const marker = new mapboxgl.Marker({
-                element: el,
-                anchor: 'center'
-            }).setLngLat([data.lon, data.lat]).addTo(this.map);
-            
-            return marker;
-        }
-        
-        updateVehicles(vehicleData) {
-            const updateStartTime = performance.now();
-            const currentTime = performance.now();
-            
-            vehicleData.forEach(data => {
-                if (!this.vehicles.has(data.id)) {
-                    this.vehicles.set(data.id, {
-                        id: data.id,
-                        previousLon: data.lon,
-                        previousLat: data.lat,
-                        currentLon: data.lon,
-                        currentLat: data.lat,
-                        targetLon: data.lon,
-                        targetLat: data.lat,
-                        lastUpdateTime: currentTime,
-                        interpolationProgress: 0,
-                        velocityLon: 0,
-                        velocityLat: 0,
-                        angle: 0,
-                        targetAngle: 0,  // Initialize target angle for smooth rotation
-                        scale: 0,
-                        targetScale: 0.8,
-                        opacity: 0,
-                        targetOpacity: 1,
-                        data: data,
-                        trail: []
-                    });
-                } else {
-                    const vehicle = this.vehicles.get(data.id);
-                    
-                    const distanceMoved = Math.sqrt(
-                        Math.pow(data.lon - vehicle.targetLon, 2) + 
-                        Math.pow(data.lat - vehicle.targetLat, 2)
-                    );
-                    
-                    if (distanceMoved > 0.000001) {
-                        vehicle.previousLon = vehicle.currentLon;
-                        vehicle.previousLat = vehicle.currentLat;
-                        
-                        vehicle.targetLon = data.lon;
-                        vehicle.targetLat = data.lat;
-                        
-                        vehicle.interpolationProgress = 0;
-                        vehicle.lastUpdateTime = currentTime;
-                        
-                        const dx = vehicle.targetLon - vehicle.previousLon;
-                        const dy = vehicle.targetLat - vehicle.previousLat;
-                        if (Math.abs(dx) > 0.00001 || Math.abs(dy) > 0.00001) {
-                            const newAngle = Math.atan2(dy, dx);
-
-                            // Smooth angle transition - no sudden jumps!
-                            if (vehicle.angle !== undefined && vehicle.angle !== null) {
-                                let angleDiff = newAngle - vehicle.angle;
-
-                                // Normalize angle difference to [-PI, PI] for shortest rotation
-                                while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
-                                while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
-
-                                // Store target angle for smooth interpolation
-                                vehicle.targetAngle = newAngle;
-                            } else {
-                                // First time - set directly
-                                vehicle.angle = newAngle;
-                                vehicle.targetAngle = newAngle;
-                            }
-                        }
-                    }
-
-                    vehicle.data = data;
-
-                    // UPDATE MARKER COLOR (V2G real-time color change)
-                    const marker = this.activeMarkers.get(data.id);
-                    if (marker) {
-                        const newColor = this.getColor(data);
-                        const element = marker.getElement();
-                        if (element) {
-                            element.style.background = newColor;
-                        }
-                    }
-                }
-            });
-
-            const currentIds = new Set(vehicleData.map(v => v.id));
-            for (const [id, vehicle] of this.vehicles) {
-                if (!currentIds.has(id)) {
-                    vehicle.targetOpacity = 0;
-                    vehicle.targetScale = 0;
-                    if (vehicle.opacity < 0.01) {
-                        this.vehicles.delete(id);
-                    }
-                }
-            }
-            
-            this.stats.updateTime = performance.now() - updateStartTime;
-            this.stats.vehicles = this.vehicles.size;
-        }
-        
-        interpolate(deltaTime) {
-            const now = performance.now();
-            
-            for (const [id, vehicle] of this.vehicles) {
-                const timeSinceUpdate = now - vehicle.lastUpdateTime;
-                const expectedUpdateInterval = PERFORMANCE_CONFIG.dataUpdateRate * 1.1;
-                vehicle.interpolationProgress = Math.min(1, timeSinceUpdate / expectedUpdateInterval);
-                
-                // Use LINEAR interpolation for accurate street following (no curve cutting)
-                vehicle.currentLon = vehicle.previousLon +
-                    (vehicle.targetLon - vehicle.previousLon) * vehicle.interpolationProgress;
-                vehicle.currentLat = vehicle.previousLat +
-                    (vehicle.targetLat - vehicle.previousLat) * vehicle.interpolationProgress;
-                
-                if (vehicle.scale !== vehicle.targetScale) {
-                    const scaleDelta = vehicle.targetScale - vehicle.scale;
-                    vehicle.scale += scaleDelta * 0.15;
-                    if (Math.abs(scaleDelta) < 0.001) {
-                        vehicle.scale = vehicle.targetScale;
-                    }
-                }
-                
-                if (vehicle.opacity !== vehicle.targetOpacity) {
-                    const opacityDelta = vehicle.targetOpacity - vehicle.opacity;
-                    vehicle.opacity += opacityDelta * 0.15;
-                    if (Math.abs(opacityDelta) < 0.001) {
-                        vehicle.opacity = vehicle.targetOpacity;
-                    }
-                }
-
-                // SMOOTH ANGLE INTERPOLATION - Fixes turning issues!
-                if (vehicle.targetAngle !== undefined && vehicle.angle !== undefined) {
-                    let angleDiff = vehicle.targetAngle - vehicle.angle;
-
-                    // Normalize to shortest rotation path
-                    while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
-                    while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
-
-                    // Smooth rotation - responsive but not too slow
-                    vehicle.angle += angleDiff * 0.35;
-
-                    // Snap when very close
-                    if (Math.abs(angleDiff) < 0.01) {
-                        vehicle.angle = vehicle.targetAngle;
-                    }
-                }
-            }
-            
-           if (PERFORMANCE_CONFIG.renderMode === 'webgl') {
-                if (!this.map.getLayer('vehicle-webgl-layer')) {
-                    this.map.addLayer(this.customLayer);
-                }
-            }
-        }
-        
-        getColor(data) {
-            // V2G ACTIVE vehicles get BRIGHT CYAN (highest priority!)
-            if (data.is_v2g_active || (window.v2gActiveVehicles && window.v2gActiveVehicles.has(data.id))) {
-                return '#00FFFF'; // Bright cyan for V2G discharge
-            }
-
-            if (data.is_stranded) return '#ff00ff';
-            if (data.is_charging) return '#00ffff';
-            if (data.is_queued) return '#ffff00';
-            if (data.is_circling) return '#ff8c00';
-            if (data.is_ev) {
-                const battery = data.battery_percent || 100;
-                if (battery < 20) return '#ff0000';
-                if (battery < 50) return '#ffa500';
-                return '#00ff00';
-            }
-            return '#6464ff';
-        }
-        
-        getStats() {
-            return this.stats;
-        }
-        
-        clear() {
-            for (const [id, marker] of this.activeMarkers) {
-                marker.remove();
-            }
-            this.activeMarkers.clear();
-            this.vehicles.clear();
-        }
-    }
 
     // ==========================================
     // GLOBAL STATE
     // ==========================================
     let networkState = null;
-    let vehicleRenderer = null;
-    let substationMarkers = {};
     let substationLayerInitialized = false;
     let evStationLayerInitialized = false;
     let vehicleClickLayerInitialized = false;
@@ -1537,7 +868,7 @@ interpolate(deltaTime) {
         },
 
         updatePerformanceStats() {
-            const stats = vehicleRenderer ? vehicleRenderer.getStats() : {};
+            const stats = { vehicles: vehicleStore.size, updateTime: 0, renderTime: 0 };
 
             const fpsEl = document.getElementById('fps-counter');
             const updateTimeEl = document.getElementById('update-time');
@@ -1578,7 +909,7 @@ interpolate(deltaTime) {
                 document.body.appendChild(debugEl);
             }
             
-            const stats = vehicleRenderer ? vehicleRenderer.getStats() : {};
+            const stats = { vehicles: vehicleStore.size, updateTime: 0, renderTime: 0 };
             debugEl.innerHTML = `
                 <div style="margin-bottom: 4px; font-weight: 600;">PERFORMANCE</div>
                 <div>FPS: <span style="color: ${this.fps >= 60 ? '#00ff88' : '#ffaa00'}">${this.fps}</span></div>
@@ -1729,44 +1060,17 @@ interpolate(deltaTime) {
         return;
     }
 
-    let lastAnimationTime = performance.now();
     let animationFrameId = null;
+    let lastVehiclePaintTime = 0;
 
-    // ==========================================
-    // 60 FPS VEHICLE INTERPOLATION LOOP
-    // ==========================================
-    let frameCounter = 0;  // For throttling
-    
-    function animateVehicles() {
-        const currentTime = performance.now();
-        
-        if (!map.getSource('vehicles-symbols')) {
-            animationFrameId = requestAnimationFrame(animateVehicles);
-            return;
-        }
-        
-        // OPTIMIZATION: Throttle to 30 FPS in low performance mode
-        frameCounter++;
-        const shouldRender = !PERFORMANCE_CONFIG || 
-                           PERFORMANCE_CONFIG.renderMode !== 'low' || 
-                           (frameCounter % 2 === 0);
-        
-        if (!shouldRender) {
-            animationFrameId = requestAnimationFrame(animateVehicles);
-            return;
-        }
-        
+    function buildInterpolatedVehicleFeatures(currentTime) {
         const features = [];
-        
-        // Interpolate all vehicles (BATCH UPDATE)
         vehicleStore.forEach((state, vehicleId) => {
             const elapsed = currentTime - state.startTime;
-            // Use dynamic interpolation duration
             let progress = Math.min(elapsed / currentInterpolationDuration, 1.0);
-            
-            // OPTIMIZATION: Skip expensive math if vehicle reached target
-            if (progress >= 1.0 && state.startLon === state.targetLon && state.startLat === state.targetLat) {
-                // Vehicle is stationary at target - use cached position
+
+            if (progress >= 1.0 && state.startLon === state.targetLon &&
+                state.startLat === state.targetLat) {
                 features.push({
                     type: 'Feature',
                     geometry: { type: 'Point', coordinates: [state.targetLon, state.targetLat] },
@@ -1783,25 +1087,18 @@ interpolate(deltaTime) {
                         assigned_station: state.assigned_station || ''
                     }
                 });
-                return;  // Skip interpolation
+                return;
             }
-            
-            // Apply easing for smoother motion
+
             progress = easeOutCubic(progress);
-            
-            // Interpolate position
             const currentLon = lerp(state.startLon, state.targetLon, progress);
             const currentLat = lerp(state.startLat, state.targetLat, progress);
-            
-            // Calculate dynamic bearing (direction of movement)
             let bearing = state.bearing;
             if (state.startLon !== state.targetLon || state.startLat !== state.targetLat) {
-                bearing = calculateBearing(state.startLon, state.startLat, state.targetLon, state.targetLat);
-                // Adjust for icon orientation (arrow pointing right)
+                bearing = calculateBearing(
+                    state.startLon, state.startLat, state.targetLon, state.targetLat);
                 bearing = (bearing - 90 + 360) % 360;
             }
-            
-            // Create GeoJSON feature
             features.push({
                 type: 'Feature',
                 geometry: { type: 'Point', coordinates: [currentLon, currentLat] },
@@ -1819,31 +1116,48 @@ interpolate(deltaTime) {
                 }
             });
         });
-        
-        // BATCH UPDATE: Single setData call per frame (not inside loop)
-        const source = map.getSource('vehicles-symbols');
-        if (source && features.length > 0) {
-            source.setData({ type: 'FeatureCollection', features });
+        return features;
+    }
+
+    function animateVehicles() {
+        const currentTime = performance.now();
+        const minMs = MapRenderScheduler.minFrameMs;
+
+        if (!map.getSource('vehicles-symbols')) {
+            animationFrameId = requestAnimationFrame(animateVehicles);
+            return;
         }
-        
-        // Continue animation loop
+
+        if (currentTime - lastVehiclePaintTime < minMs) {
+            animationFrameId = requestAnimationFrame(animateVehicles);
+            return;
+        }
+        lastVehiclePaintTime = currentTime;
+
+        const features = buildInterpolatedVehicleFeatures(currentTime);
+        const vSrc = map.getSource('vehicles-symbols');
+        if (vSrc) {
+            vSrc.setData({ type: 'FeatureCollection', features });
+        }
+        renderDynamicGridLayers();
+        renderVehicleClicksFromInterpolated();
+
         animationFrameId = requestAnimationFrame(animateVehicles);
     }
-    
-    // Start the animation loop
+
     function startVehicleAnimation() {
         if (!animationFrameId) {
-            console.log('🎬 Starting 60 FPS vehicle interpolation loop');
+            console.log('Starting throttled vehicle map render (max ' +
+                MapRenderScheduler.VEHICLE_MAP_MAX_FPS + ' FPS)');
             animationFrameId = requestAnimationFrame(animateVehicles);
         }
     }
-    
-    // Stop the animation loop
+
     function stopVehicleAnimation() {
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
             animationFrameId = null;
-            console.log('⏸️ Stopped vehicle interpolation loop');
+            console.log('Stopped vehicle map render loop');
         }
     }
     
@@ -2033,16 +1347,6 @@ interpolate(deltaTime) {
     // RENDERING FUNCTIONS WITH ENHANCED VISUALS
     // ==========================================
     function initializeRenderers() {
-        // DISABLED: Custom WebGL renderer doesn't work with 3D terrain (causes drift)
-        // Now using standard Mapbox symbol layer with map-aligned pitch for 3D compatibility
-        /*
-        if (PERFORMANCE_CONFIG.renderMode === 'webgl') {
-            vehicleRenderer = new WebGLVehicleRenderer(map);
-        } else {
-            vehicleRenderer = new HybridVehicleRenderer(map);
-        }
-        */
-        
         if (map.loaded()) {
             if (!vehicleClickLayerInitialized) initializeVehicleClickLayer();
             ensureVehicleSymbolLayer();
@@ -2523,51 +1827,18 @@ function initializeEVStationLayer() {
         vehicleClickLayerInitialized = true;
     }
 
-    function renderVehicleClicks() {
-        if (!networkState || !networkState.vehicles) return;
-        const src = map.getSource('vehicles-click');
-        if (!src) return;
-        
-        const features = networkState.vehicles.map(v => ({
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [v.lon, v.lat] },
-            properties: {
-                id: v.id,
-                is_ev: !!v.is_ev,
-                battery_percent: v.battery_percent != null ? Math.round(v.battery_percent) : undefined,
-                is_charging: !!v.is_charging,
-                is_queued: !!v.is_queued,
-                is_stranded: !!v.is_stranded,
-                assigned_station: v.assigned_station || ''
-            }
-        }));
-        src.setData({ type: 'FeatureCollection', features });
-    }
-
-    function renderNetwork() {
-        if (!networkState) return;
-        
-        // Premium substations visualization with REAL-TIME FAILURE STATUS
-        const substationFeatures = networkState.substations.map(sub => {
-            // Determine color based on operational status
-            let color = '#ff0066';  // Default: operational (pink/red)
-
+    function buildSubstationFeaturesFromState(ns) {
+        if (!ns.substations) return [];
+        return ns.substations.map(sub => {
+            let color = '#ff0066';
             if (sub.operational === false || sub.operational === 'false') {
-                // FAILED substation - BLACK
                 color = '#000000';
-                console.log(`[RENDER DEBUG] ${sub.name} set to BLACK (operational=${sub.operational})`);
             } else {
-                // Check utilization for color coding
                 const utilization = sub.load_mw / sub.capacity_mva;
-                if (utilization >= 0.95) {
-                    color = '#ff0000';  // CRITICAL - bright red
-                } else if (utilization >= 0.85) {
-                    color = '#ff9800';  // WARNING - orange
-                } else {
-                    color = '#00ff00';  // NORMAL - green
-                }
+                if (utilization >= 0.95) color = '#ff0000';
+                else if (utilization >= 0.85) color = '#ff9800';
+                else color = '#00ff00';
             }
-
             return {
                 type: 'Feature',
                 geometry: { type: 'Point', coordinates: [sub.lon, sub.lat] },
@@ -2581,12 +1852,78 @@ function initializeEVStationLayer() {
                 }
             };
         });
-        
-        if (!substationLayerInitialized && map.loaded()) {
-            if (!map.getSource('substations')) {
-                map.addSource('substations', { type: 'geojson', data: { type: 'FeatureCollection', features: [] }});
+    }
+
+    function renderDynamicGridLayers() {
+        if (!networkState) return;
+        const subSrc = map.getSource('substations');
+        if (subSrc) {
+            subSrc.setData({
+                type: 'FeatureCollection',
+                features: buildSubstationFeaturesFromState(networkState)
+            });
+        }
+        if (!networkState.ev_stations) {
+            if (map.getLayer('ev-stations-layer')) {
+                map.setLayoutProperty('ev-stations-layer', 'visibility', 'none');
             }
-            if (!map.getLayer('substations-layer')) {
+            return;
+        }
+        if (!evStationLayerInitialized && map.loaded()) {
+            initializeEVStationLayer();
+        }
+        if (!map.getSource('ev-stations')) return;
+        const evFeatures = networkState.ev_stations.map(ev => {
+            let chargingCount = ev.vehicles_charging || 0;
+            if (chargingCount === 0 && networkState.vehicles) {
+                chargingCount = networkState.vehicles.filter(v =>
+                    v.is_charging && v.assigned_station === ev.id
+                ).length;
+            }
+            return {
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [ev.lon, ev.lat] },
+                properties: {
+                    id: ev.id,
+                    name: ev.name,
+                    chargers: ev.chargers,
+                    charging_count: chargingCount,
+                    queued_count: ev.vehicles_queued || 0,
+                    operational: ev.operational,
+                    substation: ev.substation
+                }
+            };
+        });
+        map.getSource('ev-stations').setData({
+            type: 'FeatureCollection',
+            features: evFeatures
+        });
+        ['ev-stations-layer', 'ev-stations-badge-bg', 'ev-stations-badge-text', 'ev-stations-icon'].forEach(
+            id => {
+                if (map.getLayer(id)) {
+                    map.setLayoutProperty(id, 'visibility', layers.ev ? 'visible' : 'none');
+                }
+            }
+        );
+    }
+
+    function renderVehicleClicksFromInterpolated() {
+        const src = map.getSource('vehicles-click');
+        if (!src) return;
+        const t = performance.now();
+        const features = buildInterpolatedVehicleFeatures(t);
+        src.setData({ type: 'FeatureCollection', features });
+    }
+
+    function ensureSubstationLayersOnce() {
+        if (substationLayerInitialized || !map.loaded()) return;
+        if (!map.getSource('substations')) {
+            map.addSource('substations', {
+                type: 'geojson',
+                data: { type: 'FeatureCollection', features: [] }
+            });
+        }
+        if (!map.getLayer('substations-layer')) {
                 // Respect initial layer visibility state
                 const initialVisibility = layers.substations ? 'visible' : 'none';
 
@@ -2681,14 +2018,22 @@ function initializeEVStationLayer() {
                     map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
                 });
             }
-            substationLayerInitialized = true;
+        substationLayerInitialized = true;
+    }
+
+    function renderNetwork() {
+        if (!networkState) return;
+        ensureSubstationLayersOnce();
+        const tv = networkState.topology_version;
+        let shouldTopology;
+        if (tv !== undefined) {
+            shouldTopology = tv !== MapRenderScheduler.lastTopologyRendered;
+        } else {
+            shouldTopology = MapRenderScheduler.lastTopologyRendered < 0;
         }
-        
-        if (map.getSource('substations')) {
-            map.getSource('substations').setData({ type: 'FeatureCollection', features: substationFeatures });
-        }
-        
-        // Premium cable rendering
+        if (!shouldTopology) return;
+
+        // Premium cable rendering (only when topology_version changed)
         if (networkState.cables) {
             // Primary cables with enhanced glow
             if (networkState.cables.primary) {
@@ -2879,65 +2224,12 @@ function initializeEVStationLayer() {
                 map.on('mouseleave', 'traffic-lights', () => { map.getCanvas().style.cursor = ''; });
             }
         }
-        
-        updateVehicleSymbolLayer();
+
+        MapRenderScheduler.lastTopologyRendered = tv !== undefined ? tv : 0;
     }
 
     function renderEVStations() {
-        if (!networkState || !networkState.ev_stations) {
-            if (map.getLayer('ev-stations-layer')) {
-                map.setLayoutProperty('ev-stations-layer', 'visibility', 'none');
-            }
-            return;
-        }
-        
-        if (!evStationLayerInitialized && map.loaded()) {
-            initializeEVStationLayer();
-        }
-        
-        if (!map.getSource('ev-stations')) return;
-        
-        const features = networkState.ev_stations.map(ev => {
-            let chargingCount = ev.vehicles_charging || 0;
-            let queuedCount = ev.vehicles_queued || 0;
-            
-            if (chargingCount === 0 && networkState.vehicles) {
-                chargingCount = networkState.vehicles.filter(v => 
-                    v.is_charging && v.assigned_station === ev.id
-                ).length;
-            }
-            
-            return {
-                type: 'Feature',
-                geometry: {
-                    type: 'Point',
-                    coordinates: [ev.lon, ev.lat]
-                },
-                properties: {
-                    id: ev.id,
-                    name: ev.name,
-                    chargers: ev.chargers,
-                    charging_count: chargingCount,
-                    queued_count: queuedCount,
-                    operational: ev.operational,
-                    substation: ev.substation
-                }
-            };
-        });
-        
-        const source = map.getSource('ev-stations');
-        if (source) {
-            source.setData({
-                type: 'FeatureCollection',
-                features: features
-            });
-        }
-        
-        ['ev-stations-layer', 'ev-stations-badge-bg', 'ev-stations-badge-text', 'ev-stations-icon'].forEach(id => {
-            if (map.getLayer(id)) {
-                map.setLayoutProperty(id, 'visibility', layers.ev ? 'visible' : 'none');
-            }
-        });
+        renderDynamicGridLayers();
     }
 
     // ==========================================
@@ -3297,6 +2589,11 @@ function initializeEVStationLayer() {
         if (state.traffic_lights) { processNetworkState._cachedTL = state.traffic_lights; }
         else if (processNetworkState._cachedTL) { state.traffic_lights = processNetworkState._cachedTL; }
 
+        if (state.topology_version === undefined && networkState &&
+            networkState.topology_version !== undefined) {
+            state.topology_version = networkState.topology_version;
+        }
+
         networkState = state;
         
         const failedSubs = networkState.substations ? networkState.substations.filter(sub => !sub.operational) : [];
@@ -3317,17 +2614,7 @@ function initializeEVStationLayer() {
         
         updateUI();
         renderNetwork();
-        
-        // DISABLED: Custom WebGL renderer causes 3D drift
-        // Using Mapbox symbol layer instead (3D terrain compatible)
-        /*
-        if (layers.vehicles && vehicleRenderer && networkState.vehicles) {
-            vehicleRenderer.updateVehicles(networkState.vehicles);
-        }
-        */
-        
-        renderEVStations();
-        updateVehicleSymbolLayer();  // ✅ PRIMARY vehicle renderer (3D compatible)
+        updateVehicleSymbolLayer();
     }
     
     /**
@@ -3356,15 +2643,11 @@ function initializeEVStationLayer() {
             if (stopBtn) stopBtn.disabled = true;
             if (spawn10Btn) spawn10Btn.disabled = true;
             
-            // Clear vehicle renderer when stopped
-            if (vehicleRenderer && !sumoIsRunning && sumoRunning) {
-                vehicleRenderer.clear();
+            if (!sumoIsRunning && sumoRunning) {
+                vehicleStore.clear();
             }
-            
-            // Initialize WebGL vehicle renderer or hybrid based on config
+
             initializeRenderers();
-            
-            // Start 60 FPS vehicle interpolation loop
             startVehicleAnimation();
             
             // Update global state
@@ -3436,9 +2719,8 @@ function initializeEVStationLayer() {
         // Update EV station badges
         updateEVStationBadges();
         
-        // Re-render vehicles with updated V2G status
-        if (vehicleRenderer && networkState.vehicles) {
-            vehicleRenderer.updateVehicles(networkState.vehicles);
+        if (networkState && networkState.vehicles) {
+            updateVehicleSymbolLayer();
         }
     }
     
@@ -3546,7 +2828,7 @@ function initializeEVStationLayer() {
             'lights': ['traffic-lights'],
             'primary': ['primary-cables', 'primary-cables-glow'],
             'secondary': ['secondary-cables', 'secondary-cables-glow'],
-            'vehicles': ['vehicle-webgl-layer', 'vehicles-symbols', 'vehicles-click-layer'],
+            'vehicles': ['vehicles-symbols', 'vehicles-click-layer'],
             'ev': ['ev-stations-layer', 'ev-stations-badge-bg', 'ev-stations-badge-text', 'ev-stations-icon'],
             'substations': ['substations-layer', 'substations-icon']
         };
@@ -3558,9 +2840,6 @@ function initializeEVStationLayer() {
             }
         });
         
-        if (layer === 'vehicles' && !layers[layer] && vehicleRenderer) {
-            vehicleRenderer.clear();
-        }
     }
 
     // =========================================================================

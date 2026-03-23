@@ -801,6 +801,7 @@ class ManhattanIntegratedSystem(PowerBackend, TrafficBackend):
         op_secondary = sum(1 for c in self.secondary_cables if c['operational'])
 
         return {
+            'topology_version': self._topo_version,
             'substations': substations_list,
             'total_load_mw': total_load_mw,
             'traffic_lights': self._cached_tl_list,
