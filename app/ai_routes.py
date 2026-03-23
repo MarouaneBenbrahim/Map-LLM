@@ -184,7 +184,7 @@ def ai_visual_analysis():
         if _system_state["sumo_running"] and _sumo_manager.running:
             vehicles = []
             try:
-                import traci
+                from sumo_mgr.traci_compat import traci
 
                 for vehicle in _sumo_manager.vehicles.values():
                     if vehicle.id in traci.vehicle.getIDList():

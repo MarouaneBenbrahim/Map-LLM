@@ -270,9 +270,10 @@ class V2GManager:
         if substation_name in self.restored_substations:
             return
         
-        import traci
+        from sumo_mgr.traci_compat import traci
         
         eligible_vehicles = []
+        active_ids = set(traci.vehicle.getIDList())
         
         # Find high-SOC EVs
         for vehicle in self.sumo_manager.vehicles.values():
@@ -281,7 +282,6 @@ class V2GManager:
             
             # Check SOC requirement
             if vehicle.config.current_soc < self.MIN_SOC_FOR_V2G:
-                # print(f"[V2G DEBUG] Skipped {vehicle.id}: Low SOC ({vehicle.config.current_soc:.2f})") 
                 continue
             
             # Skip if already occupied
@@ -290,10 +290,9 @@ class V2GManager:
                 vehicle.id in self.pending_v2g_vehicles or
                 (hasattr(vehicle, 'is_charging') and vehicle.is_charging) or
                 (hasattr(vehicle, 'assigned_ev_station') and vehicle.assigned_ev_station)):
-                # print(f"[V2G DEBUG] Skipped {vehicle.id}: Busy")
                 continue
             
-            if vehicle.id in traci.vehicle.getIDList():
+            if vehicle.id in active_ids:
                 eligible_vehicles.append(vehicle)
         
         if eligible_vehicles:
@@ -323,7 +322,7 @@ class V2GManager:
     def _route_to_v2g_station(self, vehicle, substation_name: str):
         """Route vehicle to V2G station with visual feedback"""
         
-        import traci
+        from sumo_mgr.traci_compat import traci
         
         # Prevent double assignment
         if vehicle.id in self.v2g_locked_vehicles or vehicle.id in self.pending_v2g_vehicles:
@@ -435,7 +434,7 @@ class V2GManager:
         self.stats['active_v2g_vehicles'] = len(self.active_sessions)
         
         # Lock at station
-        import traci
+        from sumo_mgr.traci_compat import traci
         if vehicle_id in traci.vehicle.getIDList():
             traci.vehicle.setSpeed(vehicle_id, 0)
             current_edge = traci.vehicle.getRoadID(vehicle_id)
@@ -458,8 +457,9 @@ class V2GManager:
     def update_v2g_sessions(self):
         """Update V2G sessions with REALISTIC FAST DISCHARGE"""
         
-        import traci
+        from sumo_mgr.traci_compat import traci
         
+        active_ids = set(traci.vehicle.getIDList())
         sessions_to_end = []
         total_power_provided = 0
         
@@ -475,7 +475,7 @@ class V2GManager:
                 continue
             
             # Visual feedback
-                if vehicle_id in traci.vehicle.getIDList():
+                if vehicle_id in active_ids:
                     traci.vehicle.setSpeed(vehicle_id, 0)
                     try:
                         current_edge = traci.vehicle.getRoadID(vehicle_id)
@@ -587,7 +587,6 @@ class V2GManager:
 
         # PROCESS PENDING VEHICLES (Transition to Active)
         # Vehicles that were assigned but haven't started discharging yet
-        import traci
         for vehicle_id in list(self.pending_v2g_vehicles.keys()):
             if vehicle_id not in self.sumo_manager.vehicles:
                 # Vehicle left simulation
@@ -601,7 +600,7 @@ class V2GManager:
                 if not vehicle:
                     continue
 
-                if vehicle_id in traci.vehicle.getIDList():
+                if vehicle_id in active_ids:
                     speed = traci.vehicle.getSpeed(vehicle_id)
                     current_edge = traci.vehicle.getRoadID(vehicle_id)
                     
@@ -678,7 +677,7 @@ class V2GManager:
                 vehicle.charging_at_station = None
             
             # Resume driving
-            import traci
+            from sumo_mgr.traci_compat import traci
             if vehicle_id in traci.vehicle.getIDList():
                 traci.vehicle.setColor(vehicle_id, (0, 255, 0, 255))
                 traci.vehicle.setSpeed(vehicle_id, -1)

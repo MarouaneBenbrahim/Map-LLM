@@ -34,6 +34,11 @@ except Exception:
     OpenAI = None
 
 load_dotenv()
+
+import sumo_mgr.traci_compat as traci_compat
+
+traci_compat.init(force_traci=os.environ.get("FORCE_TRACI", "0") == "1")
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 CORS(app)
@@ -143,11 +148,23 @@ try:
 
     print("Initializing scenario controller...")
 
+    _last_topo = {"version": -1}
+
     def broadcast_state(scenario_status):
         try:
             state = integrated_system.get_network_state()
             state["scenario"] = scenario_status
             state["sumo_running"] = system_state.get("sumo_running", False)
+
+            # Only include cables and traffic_lights when the topology
+            # has actually changed; the frontend caches the last-received
+            # values for frames where they are omitted.
+            topo_v = integrated_system._topo_version
+            if topo_v == _last_topo["version"]:
+                state.pop("cables", None)
+                state.pop("traffic_lights", None)
+            else:
+                _last_topo["version"] = topo_v
 
             if system_state.get("sumo_running", False) and sumo_manager.running:
                 try:
@@ -155,40 +172,39 @@ try:
                     state["vehicles"] = vehicles
                     state["vehicle_count"] = len(vehicles)
 
-                    import traci
+                    from sumo_mgr.traci_compat import traci as _traci
                     try:
-                        pending_count = traci.simulation.getPendingVehicles().getIDCount()
+                        pending_count = _traci.simulation.getPendingVehicles().getIDCount()
                     except Exception:
                         pending_count = 0
+
+                    ev = gas = charging = low_bat = med_bat = high_bat = 0
+                    for v in vehicles:
+                        if v.get("is_ev", False):
+                            ev += 1
+                            bp = v.get("battery_percent", 100)
+                            if bp < 20:
+                                low_bat += 1
+                            elif bp < 50:
+                                med_bat += 1
+                            else:
+                                high_bat += 1
+                            if v.get("is_charging", False):
+                                charging += 1
+                        else:
+                            gas += 1
 
                     state["vehicle_stats"] = {
                         "active_vehicles": len(vehicles),
                         "pending_vehicles": pending_count,
                         "total_configured": len(vehicles) + pending_count,
                         "total_vehicles": len(vehicles),
-                        "ev_vehicles": sum(1 for v in vehicles if v.get("is_ev", False)),
-                        "gas_vehicles": sum(
-                            1 for v in vehicles if not v.get("is_ev", False)
-                        ),
-                        "vehicles_charging": sum(
-                            1 for v in vehicles if v.get("is_charging", False)
-                        ),
-                        "vehicles_low_battery": sum(
-                            1
-                            for v in vehicles
-                            if v.get("is_ev", False) and v.get("battery_percent", 100) < 20
-                        ),
-                        "vehicles_medium_battery": sum(
-                            1
-                            for v in vehicles
-                            if v.get("is_ev", False)
-                            and 20 <= v.get("battery_percent", 100) < 50
-                        ),
-                        "vehicles_high_battery": sum(
-                            1
-                            for v in vehicles
-                            if v.get("is_ev", False) and v.get("battery_percent", 100) >= 50
-                        ),
+                        "ev_vehicles": ev,
+                        "gas_vehicles": gas,
+                        "vehicles_charging": charging,
+                        "vehicles_low_battery": low_bat,
+                        "vehicles_medium_battery": med_bat,
+                        "vehicles_high_battery": high_bat,
                     }
                 except Exception as e:
                     print(f"Socket vehicle update error: {e}")
@@ -288,25 +304,25 @@ EDGE_SHAPES: dict = {}
 
 def preload_edge_shapes(max_edges: int | None = None) -> int:
     """Preload and cache SUMO edge shapes into EDGE_SHAPES using traci."""
-    try:
-        import traci
-    except Exception:
+    from sumo_mgr.traci_compat import traci as _traci, SUMO_AVAILABLE as _sumo_ok
+
+    if not _sumo_ok:
         return 0
     if not (system_state.get("sumo_running") and getattr(sumo_manager, "running", False)):
         return 0
     count = 0
     try:
-        edge_ids = [e for e in traci.edge.getIDList() if not e.startswith(":")]
+        edge_ids = [e for e in _traci.edge.getIDList() if not e.startswith(":")]
         if max_edges is not None:
             edge_ids = edge_ids[:max_edges]
         for edge_id in edge_ids:
             if edge_id in EDGE_SHAPES:
                 continue
             try:
-                shape_xy = traci.edge.getShape(edge_id)
+                shape_xy = _traci.edge.getShape(edge_id)
                 edge_shape = []
                 for sx, sy in shape_xy:
-                    slon, slat = traci.simulation.convertGeo(sx, sy)
+                    slon, slat = _traci.simulation.convertGeo(sx, sy)
                     edge_shape.append([slon, slat])
                 EDGE_SHAPES[edge_id] = {"xy": shape_xy, "lonlat": edge_shape}
                 count += 1

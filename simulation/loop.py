@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import traceback
+from collections import deque
 from datetime import datetime
-from typing import Dict, Any
+from typing import Any, Dict
 
 from config.ev_bus_mapping import EV_BUS_MAPPING
 from .context import SimulationContext, system_state, vehicle_spawn_queue
@@ -14,10 +15,60 @@ _PERF_LATEST: Dict[str, Any] = {
     "counts": {},
 }
 
+_DIAG_LATEST: Dict[str, Any] = {
+    "active_sumo_vehicles": 0,
+    "tracked_vehicles": 0,
+    "stalled_vehicles_count": 0,
+    "ghost_vehicles_count": 0,
+}
+
+
+def _maybe_sustain_vehicle_population(sumo_manager: Any) -> None:
+    """Keep active SUMO vehicle count near ``target_vehicle_population`` (cap per step)."""
+    target = system_state.get("target_vehicle_population")
+    if target is None or target <= 0:
+        system_state["sustain_spawned_last_step"] = 0
+        return
+    if not getattr(sumo_manager, "running", False):
+        system_state["sustain_spawned_last_step"] = 0
+        return
+
+    from sumo_mgr.traci_compat import traci as _tc
+
+    try:
+        active = len(_tc.vehicle.getIDList())
+    except Exception:
+        system_state["sustain_spawned_last_step"] = 0
+        return
+
+    deficit = int(target) - active
+    if deficit <= 0:
+        system_state["sustain_spawned_last_step"] = 0
+        return
+
+    max_per = max(1, int(system_state.get("sustain_max_per_step", 50)))
+    n = min(max_per, deficit)
+    ev_pct = float(system_state.get("sustain_ev_fraction", 0.6))
+    bmin = float(system_state.get("sustain_battery_min_soc", 0.2))
+    bmax = float(system_state.get("sustain_battery_max_soc", 0.9))
+    try:
+        spawned = int(sumo_manager.spawn_vehicles(n, ev_pct, bmin, bmax))
+        system_state["sustain_spawned_last_step"] = spawned
+    except Exception as exc:
+        system_state["sustain_spawned_last_step"] = 0
+        print(f"[SUSTAIN] spawn error: {exc}")
+
 
 def get_perf_snapshot() -> Dict[str, Any]:
     """Return a lightweight snapshot of recent simulation performance metrics."""
-    return dict(_PERF_LATEST)
+    snapshot = dict(_PERF_LATEST)
+    snapshot["diagnostics"] = dict(_DIAG_LATEST)
+    snapshot["sustain"] = {
+        "target_vehicle_population": system_state.get("target_vehicle_population"),
+        "sustain_spawned_last_step": system_state.get("sustain_spawned_last_step", 0),
+        "sustain_max_per_step": system_state.get("sustain_max_per_step", 50),
+    }
+    return snapshot
 
 
 def create_simulation_context(
@@ -94,13 +145,21 @@ def _simulation_loop(ctx: SimulationContext) -> None:
     last_v2g_update = 0
     last_power_flow = 0
 
-    perf_stats: Dict[str, list[float]] = {
-        "sumo_step": [],
-        "ev_update": [],
-        "power_flow": [],
-        "total_step": [],
+    perf_stats = {
+        "sumo_step": deque(maxlen=300),
+        "ev_update": deque(maxlen=300),
+        "power_flow": deque(maxlen=100),
+        "total_step": deque(maxlen=300),
     }
+    perf_sample_counts = {k: 0 for k in perf_stats}
     last_perf_report = 0
+
+    # Frozen-vehicle diagnostics: vid -> cumulative zero-speed sample steps
+    stall_tracker: Dict[str, int] = {}
+    STALL_THRESHOLD = 10
+    DIAG_INTERVAL = 50
+    # Align ~300s sim time with SUMO --time-to-teleport (stall accumulates +DIAG_INTERVAL/tick).
+    CULL_THRESHOLD = 3000
 
     print("\n" + "=" * 70)
     print("REALISTIC TIMING MODE ENABLED")
@@ -140,11 +199,60 @@ def _simulation_loop(ctx: SimulationContext) -> None:
 
                 sumo_manager.step()
 
+                _maybe_sustain_vehicle_population(sumo_manager)
+
                 sumo_time = (time_module.perf_counter() - sumo_start) * 1000
                 perf_stats["sumo_step"].append(sumo_time)
+                perf_sample_counts["sumo_step"] += 1
+
+                step_counter += 1
+
+                # Frozen / ghost vehicle diagnostics (every DIAG_INTERVAL steps)
+                if step_counter % DIAG_INTERVAL == 0:
+                    from sumo_mgr.traci_compat import traci as _diag_traci
+
+                    active_ids = set(_diag_traci.vehicle.getIDList())
+                    tracked_ids = set(sumo_manager.vehicles.keys())
+
+                    ghost_count = len(tracked_ids - active_ids)
+
+                    new_tracker: Dict[str, int] = {}
+                    stalled = 0
+                    culled = 0
+                    for vid in active_ids:
+                        try:
+                            speed = _diag_traci.vehicle.getSpeed(vid)
+                        except Exception:
+                            continue
+                        if speed < 0.01:
+                            elapsed = stall_tracker.get(vid, 0) + DIAG_INTERVAL
+                            new_tracker[vid] = elapsed
+                            if elapsed >= STALL_THRESHOLD:
+                                stalled += 1
+                            if elapsed >= CULL_THRESHOLD:
+                                try:
+                                    _diag_traci.vehicle.remove(vid)
+                                    culled += 1
+                                except Exception:
+                                    pass
+                    stall_tracker.clear()
+                    stall_tracker.update(new_tracker)
+
+                    _DIAG_LATEST["active_sumo_vehicles"] = len(active_ids)
+                    _DIAG_LATEST["tracked_vehicles"] = len(tracked_ids)
+                    _DIAG_LATEST["stalled_vehicles_count"] = stalled
+                    _DIAG_LATEST["ghost_vehicles_count"] = ghost_count
+
+                    diag_msg = (
+                        f"[DIAG] step={system_state['current_time']} "
+                        f"active={len(active_ids)} tracked={len(tracked_ids)} "
+                        f"stalled={stalled} ghosts={ghost_count}"
+                    )
+                    if culled:
+                        diag_msg += f" culled={culled}"
+                    print(diag_msg)
 
                 # Socket broadcast: frame skipping
-                step_counter += 1
                 if (
                     step_counter % BROADCAST_INTERVAL == 0
                     and scenario_controller is not None
@@ -183,6 +291,7 @@ def _simulation_loop(ctx: SimulationContext) -> None:
                     _update_ev_power_loads(ctx)
                     ev_time = (time_module.perf_counter() - ev_start) * 1000
                     perf_stats["ev_update"].append(ev_time)
+                    perf_sample_counts["ev_update"] += 1
                     last_ev_update = system_state["current_time"]
 
                 # Power flow updates
@@ -192,6 +301,7 @@ def _simulation_loop(ctx: SimulationContext) -> None:
                         power_grid.run_power_flow("dc")
                         pf_time = (time_module.perf_counter() - pf_start) * 1000
                         perf_stats["power_flow"].append(pf_time)
+                        perf_sample_counts["power_flow"] += 1
                         if pf_time > 100:
                             print(f"[WARNING] Power flow took {pf_time:.1f}ms")
                     except Exception as exc:  # noqa: BLE001
@@ -203,20 +313,19 @@ def _simulation_loop(ctx: SimulationContext) -> None:
             # Track total step time
             total_time = (time_module.perf_counter() - step_start) * 1000
             perf_stats["total_step"].append(total_time)
+            perf_sample_counts["total_step"] += 1
 
             # Performance report every 30 seconds (300 SUMO steps)
             if system_state["current_time"] - last_perf_report >= 300:
                 sim_time = system_state["current_time"] * SUMO_STEP_TIME
                 if perf_stats["sumo_step"]:
-                    avg_sumo = sum(perf_stats["sumo_step"][-100:]) / min(
-                        100, len(perf_stats["sumo_step"])
-                    )
-                    avg_total = sum(perf_stats["total_step"][-100:]) / min(
-                        100, len(perf_stats["total_step"])
-                    )
+                    recent_sumo = list(perf_stats["sumo_step"])[-100:]
+                    avg_sumo = sum(recent_sumo) / len(recent_sumo)
+                    recent_total = list(perf_stats["total_step"])[-100:]
+                    avg_total = sum(recent_total) / len(recent_total)
                     if perf_stats["power_flow"]:
-                        tail = perf_stats["power_flow"][-10:]
-                        avg_pf = sum(tail) / max(1, len(tail))
+                        recent_pf = list(perf_stats["power_flow"])[-10:]
+                        avg_pf = sum(recent_pf) / len(recent_pf)
                     else:
                         avg_pf = 0.0
 
@@ -227,7 +336,6 @@ def _simulation_loop(ctx: SimulationContext) -> None:
                     )
                     print(f"       Power flow: {avg_pf:.1f}ms")
 
-                    # Update exported perf snapshot
                     _PERF_LATEST["last_updated"] = datetime.now().isoformat()
                     _PERF_LATEST["avg_ms"] = {
                         "sumo_step": round(avg_sumo, 2),
@@ -235,9 +343,9 @@ def _simulation_loop(ctx: SimulationContext) -> None:
                         "power_flow": round(avg_pf, 2),
                     }
                     _PERF_LATEST["counts"] = {
-                        "sumo_step_samples": len(perf_stats["sumo_step"]),
-                        "total_step_samples": len(perf_stats["total_step"]),
-                        "power_flow_samples": len(perf_stats["power_flow"]),
+                        "sumo_step_samples": perf_sample_counts["sumo_step"],
+                        "total_step_samples": perf_sample_counts["total_step"],
+                        "power_flow_samples": perf_sample_counts["power_flow"],
                     }
 
                 last_perf_report = system_state["current_time"]

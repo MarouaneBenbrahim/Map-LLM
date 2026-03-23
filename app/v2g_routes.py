@@ -221,7 +221,7 @@ def test_v2g_scenario():
 
         routed_vehicles = []
         if _sumo_manager.running:
-            import traci  # noqa: F811
+            from sumo_mgr.traci_compat import traci  # noqa: F811
 
             for vehicle in _sumo_manager.vehicles.values():
                 if (

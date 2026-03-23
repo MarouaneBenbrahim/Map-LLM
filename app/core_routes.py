@@ -160,7 +160,7 @@ def get_network_state():
         station_queued_counts: dict = {}
 
         try:
-            import traci
+            from sumo_mgr.traci_compat import traci
 
             active_vehicle_ids = set(traci.vehicle.getIDList())
             for vehicle in _sumo_manager.vehicles.values():

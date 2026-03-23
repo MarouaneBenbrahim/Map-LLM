@@ -89,6 +89,71 @@ def stop_sumo():
     return jsonify({"success": False, "message": "SUMO not running"})
 
 
+@bp.route("/api/sumo/sustain", methods=["GET", "POST"])
+def sustain_population():
+    """Get or set sustained target vehicle population (replenished in the simulation loop)."""
+    if _system_state is None:
+        return jsonify({"success": False, "message": "System state not initialized"}), 503
+
+    if request.method == "GET":
+        return jsonify({
+            "success": True,
+            "target_vehicle_population": _system_state.get("target_vehicle_population"),
+            "sustain_ev_fraction": _system_state.get("sustain_ev_fraction", 0.6),
+            "sustain_battery_min_soc": _system_state.get("sustain_battery_min_soc", 0.2),
+            "sustain_battery_max_soc": _system_state.get("sustain_battery_max_soc", 0.9),
+            "sustain_max_per_step": _system_state.get("sustain_max_per_step", 50),
+            "sustain_spawned_last_step": _system_state.get("sustain_spawned_last_step", 0),
+        })
+
+    data = request.json or {}
+    if "target_vehicle_population" in data:
+        raw = data["target_vehicle_population"]
+        if raw is None:
+            _system_state["target_vehicle_population"] = None
+        else:
+            try:
+                t = int(raw)
+                _system_state["target_vehicle_population"] = None if t <= 0 else t
+            except (TypeError, ValueError):
+                return jsonify({"success": False, "message": "target_vehicle_population must be int or null"}), 400
+
+    if "sustain_ev_fraction" in data:
+        try:
+            _system_state["sustain_ev_fraction"] = float(
+                max(0.0, min(1.0, float(data["sustain_ev_fraction"])))
+            )
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Invalid sustain_ev_fraction"}), 400
+
+    if "sustain_battery_min_soc" in data:
+        try:
+            _system_state["sustain_battery_min_soc"] = float(data["sustain_battery_min_soc"])
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Invalid sustain_battery_min_soc"}), 400
+
+    if "sustain_battery_max_soc" in data:
+        try:
+            _system_state["sustain_battery_max_soc"] = float(data["sustain_battery_max_soc"])
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Invalid sustain_battery_max_soc"}), 400
+
+    if "sustain_max_per_step" in data:
+        try:
+            _system_state["sustain_max_per_step"] = max(1, min(200, int(data["sustain_max_per_step"])))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Invalid sustain_max_per_step"}), 400
+
+    return jsonify({
+        "success": True,
+        "target_vehicle_population": _system_state.get("target_vehicle_population"),
+        "sustain_ev_fraction": _system_state.get("sustain_ev_fraction", 0.6),
+        "sustain_battery_min_soc": _system_state.get("sustain_battery_min_soc", 0.2),
+        "sustain_battery_max_soc": _system_state.get("sustain_battery_max_soc", 0.9),
+        "sustain_max_per_step": _system_state.get("sustain_max_per_step", 50),
+    })
+
+
 @bp.route("/api/sumo/spawn", methods=["POST"])
 def spawn_vehicles():
     """Spawn additional vehicles (async queue)."""
@@ -208,7 +273,7 @@ def test_ev_rush():
     for i in range(30):
         vehicle_id = f"test_ev_{i}"
         try:
-            import traci
+            from sumo_mgr.traci_compat import traci
 
             edges = [e for e in traci.edge.getIDList() if not e.startswith(":")]
             if len(edges) >= 2:
@@ -232,3 +297,37 @@ def test_ev_rush():
             pass
 
     return jsonify({"success": True, "message": f"Spawned {spawned} low-battery EVs for testing"})
+
+
+@bp.route("/api/traffic/routing", methods=["GET"])
+def get_routing_config():
+    """Return current dynamic rerouting parameters."""
+    if _sumo_manager is None:
+        return jsonify({"success": False, "message": "SUMO manager not initialized"}), 503
+
+    config = _sumo_manager.get_routing_config()
+    return jsonify({"success": True, "config": config})
+
+
+@bp.route("/api/traffic/routing", methods=["POST"])
+def update_routing_config():
+    """Update dynamic rerouting probability and period for all vehicles."""
+    if _sumo_manager is None:
+        return jsonify({"success": False, "message": "SUMO manager not initialized"}), 503
+
+    data = request.json or {}
+    current = _sumo_manager.get_routing_config()
+
+    probability = data.get("probability", current["probability"])
+    period = data.get("period", current["period"])
+
+    try:
+        probability = max(0.0, min(1.0, float(probability)))
+        period = max(10, min(300, int(period)))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Invalid parameter types"}), 400
+
+    updated = _sumo_manager.update_routing_config(probability, period)
+
+    sumo_applied = bool(_system_state and _system_state.get("sumo_running"))
+    return jsonify({"success": True, "config": updated, "applied_to_active": sumo_applied})

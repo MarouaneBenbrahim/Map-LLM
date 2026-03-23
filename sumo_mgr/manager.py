@@ -92,7 +92,7 @@ class ManhattanSUMOManager(_BaseSUMOManager):
             return None
 
         try:
-            import traci
+            from sumo_mgr.traci_compat import traci
 
             x, y = traci.vehicle.getPosition(vehicle_id)
             vehicle_lon, vehicle_lat = traci.simulation.convertGeo(x, y)

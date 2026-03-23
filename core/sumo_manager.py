@@ -167,7 +167,7 @@ class ManhattanSUMOManager(BaseSUMOManager):
         
         # Estimate traffic impact
         try:
-            import traci
+            from sumo_mgr.traci_compat import traci
             if self.running:
                 # Get current traffic metrics
                 vehicle_ids = traci.vehicle.getIDList()
@@ -196,12 +196,13 @@ class ManhattanSUMOManager(BaseSUMOManager):
             return []
         
         try:
-            import traci
+            from sumo_mgr.traci_compat import traci
             vehicles_data = []
+            active_ids = set(traci.vehicle.getIDList())
             
             for vehicle in self.vehicles.values():
                 try:
-                    if vehicle.id in traci.vehicle.getIDList():
+                    if vehicle.id in active_ids:
                         # Get position
                         x, y = traci.vehicle.getPosition(vehicle.id)
                         lon, lat = traci.simulation.convertGeo(x, y)
