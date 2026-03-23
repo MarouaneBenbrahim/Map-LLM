@@ -190,6 +190,19 @@ class ScenarioController:
             except Exception:
                 pass
 
+        # Sustained fleet (simulation loop replenishes toward this count).
+        if "target_vehicle_population" in scenario:
+            from simulation.context import system_state as _ss
+
+            raw = scenario["target_vehicle_population"]
+            _ss["target_vehicle_population"] = None if raw is None else int(raw)
+            if _ss["target_vehicle_population"]:
+                _ss["sustain_ev_fraction"] = float(scenario.get("ev_percentage", 0.6))
+                soc = scenario.get("battery_soc_range", [0.2, 0.9])
+                _ss["sustain_battery_min_soc"] = float(soc[0])
+                _ss["sustain_battery_max_soc"] = float(soc[1])
+                _ss["sustain_max_per_step"] = int(scenario.get("sustain_max_per_step", 50))
+
         print(f"[SCENARIO] Loaded '{scenario.get('name', path.stem)}' from {path.name}")
         return scenario
 

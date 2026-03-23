@@ -16,6 +16,13 @@ system_state: Dict[str, Any] = {
     # Default scenario is imported lazily in SimulationContext to avoid
     # circular imports with core.sumo_manager.
     "scenario": None,
+    # Sustained fleet: replenish up to this many active SUMO vehicles (None = off).
+    "target_vehicle_population": None,
+    "sustain_ev_fraction": 0.6,
+    "sustain_battery_min_soc": 0.2,
+    "sustain_battery_max_soc": 0.9,
+    "sustain_max_per_step": 50,
+    "sustain_spawned_last_step": 0,
 }
 
 # Asynchronous vehicle spawn queue (processed inside the simulation loop)

@@ -81,6 +81,34 @@ def test_load_scenario_file(controller, tmp_path):
     controller.load_model.set_time_of_day.assert_called()
 
 
+def test_load_scenario_file_sets_target_vehicle_population(controller, tmp_path):
+    from simulation.context import system_state
+
+    prev = system_state.get("target_vehicle_population")
+    try:
+        scenario = {
+            "name": "Stress",
+            "time_of_day": 17.0,
+            "temperature_c": 35,
+            "ev_spawn_count": 0,
+            "target_vehicle_population": 1000,
+            "ev_percentage": 0.6,
+            "battery_soc_range": [0.1, 0.8],
+            "sustain_max_per_step": 50,
+            "forced_failures": [],
+        }
+        path = tmp_path / "stress.json"
+        path.write_text(json.dumps(scenario))
+        controller.load_scenario_file(path)
+        assert system_state["target_vehicle_population"] == 1000
+        assert system_state["sustain_ev_fraction"] == 0.6
+        assert system_state["sustain_battery_min_soc"] == 0.1
+        assert system_state["sustain_battery_max_soc"] == 0.8
+        assert system_state["sustain_max_per_step"] == 50
+    finally:
+        system_state["target_vehicle_population"] = prev
+
+
 def test_load_scenario_file_with_failures(controller, tmp_path):
     scenario = {
         "name": "Blackout Test",
